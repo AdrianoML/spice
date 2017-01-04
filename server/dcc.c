@@ -161,7 +161,7 @@ static void display_channel_client_init(DisplayChannelClient *self)
     ring_init(&self->priv->palette_cache_lru);
     self->priv->palette_cache_available = CLIENT_PALETTE_CACHE_SIZE;
     // todo: tune quality according to bandwidth
-    self->priv->encoders.jpeg_quality = 85;
+    self->priv->encoders.jpeg_quality = 90;
 
     self->priv->send_data.free_list.res =
         spice_malloc(sizeof(SpiceResourceList) +
