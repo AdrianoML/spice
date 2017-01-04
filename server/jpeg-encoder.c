@@ -236,7 +236,14 @@ int jpeg_encode(JpegEncoderContext *jpeg, int quality, JpegEncoderImageType type
     enc->cinfo.input_components = 3;
     enc->cinfo.in_color_space = JCS_RGB;
     jpeg_set_defaults(&enc->cinfo);
+
     jpeg_set_quality(&enc->cinfo, quality, TRUE);
+    enc->cinfo.comp_info[0].h_samp_factor = 1;
+    enc->cinfo.comp_info[0].v_samp_factor = 1;
+    enc->cinfo.comp_info[1].h_samp_factor = 1;
+    enc->cinfo.comp_info[1].v_samp_factor = 1;
+    enc->cinfo.comp_info[2].h_samp_factor = 1;
+    enc->cinfo.comp_info[2].v_samp_factor = 1;
 
     enc->dest_mgr.next_output_byte = io_ptr;
     enc->dest_mgr.free_in_buffer = num_io_bytes;
