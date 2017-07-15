@@ -19,9 +19,10 @@
 #include <config.h>
 #endif
 
-#include <stdbool.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <glib.h>
+
 #include "red-common.h"
 #include "memslot.h"
 #include "red-parse-qxl.h"
@@ -30,7 +31,9 @@
 
 struct RedRecord {
     FILE *fd;
+    pthread_mutex_t lock;
     unsigned int counter;
+    gint refs;
 };
 
 #if 0
@@ -313,7 +316,7 @@ static void red_record_image(FILE *fd, RedMemSlotInfo *slots, int group_id,
         spice_assert(size == qxl->quic.data_size);
         break;
     default:
-        spice_error("%s: unknown type %d", __FUNCTION__, qxl->descriptor.type);
+        spice_error("unknown type %d", qxl->descriptor.type);
     }
 }
 
@@ -592,7 +595,7 @@ static void red_record_native_drawable(FILE *fd, RedMemSlotInfo *slots, int grou
         red_record_composite_ptr(fd, slots, group_id, &qxl->u.composite, flags);
         break;
     default:
-        spice_error("%s: unknown type %d", __FUNCTION__, qxl->type);
+        spice_error("unknown type %d", qxl->type);
         break;
     };
 }
@@ -660,7 +663,7 @@ static void red_record_compat_drawable(FILE *fd, RedMemSlotInfo *slots, int grou
         red_record_whiteness_ptr(fd, slots, group_id, &qxl->u.whiteness, flags);
         break;
     default:
-        spice_error("%s: unknown type %d", __FUNCTION__, qxl->type);
+        spice_error("unknown type %d", qxl->type);
         break;
     };
 }
@@ -794,15 +797,17 @@ void red_record_primary_surface_create(RedRecord *record,
 {
     FILE *fd = record->fd;
 
+    pthread_mutex_lock(&record->lock);
     fprintf(fd, "%d %d %d %d\n", surface->width, surface->height,
         surface->stride, surface->format);
     fprintf(fd, "%d %d %d %d\n", surface->position, surface->mouse_mode,
         surface->flags, surface->type);
     write_binary(fd, "data", line_0 ? abs(surface->stride)*surface->height : 0,
         line_0);
+    pthread_mutex_unlock(&record->lock);
 }
 
-void red_record_event(RedRecord *record, int what, uint32_t type)
+static void red_record_event_unlocked(RedRecord *record, int what, uint32_t type)
 {
     red_time_t ts = spice_get_monotonic_time_ns();
     // TODO: record the size of the packet in the header. This would make
@@ -813,12 +818,20 @@ void red_record_event(RedRecord *record, int what, uint32_t type)
     fprintf(record->fd, "event %u %d %u %"PRIu64"\n", record->counter++, what, type, ts);
 }
 
+void red_record_event(RedRecord *record, int what, uint32_t type)
+{
+    pthread_mutex_lock(&record->lock);
+    red_record_event_unlocked(record, what, type);
+    pthread_mutex_unlock(&record->lock);
+}
+
 void red_record_qxl_command(RedRecord *record, RedMemSlotInfo *slots,
                             QXLCommandExt ext_cmd)
 {
     FILE *fd = record->fd;
 
-    red_record_event(record, 0, ext_cmd.cmd.type);
+    pthread_mutex_lock(&record->lock);
+    red_record_event_unlocked(record, 0, ext_cmd.cmd.type);
 
     switch (ext_cmd.cmd.type) {
     case QXL_CMD_DRAW:
@@ -837,6 +850,7 @@ void red_record_qxl_command(RedRecord *record, RedMemSlotInfo *slots,
         red_record_cursor_cmd(fd, slots, ext_cmd.group_id, ext_cmd.cmd.data);
         break;
     }
+    pthread_mutex_unlock(&record->lock);
 }
 
 /**
@@ -898,15 +912,25 @@ RedRecord *red_record_new(const char *filename)
     }
 
     record = g_new(RedRecord, 1);
+    record->refs = 1;
     record->fd = f;
     record->counter = 0;
+    pthread_mutex_init(&record->lock, NULL);
     return record;
 }
 
-void red_record_free(RedRecord *record)
+RedRecord *red_record_ref(RedRecord *record)
 {
-    if (record) {
-        fclose(record->fd);
-        g_free(record);
+    g_atomic_int_inc(&record->refs);
+    return record;
+}
+
+void red_record_unref(RedRecord *record)
+{
+    if (!record || !g_atomic_int_dec_and_test(&record->refs)) {
+        return;
     }
+    fclose(record->fd);
+    pthread_mutex_destroy(&record->lock);
+    g_free(record);
 }

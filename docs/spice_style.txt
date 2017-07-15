@@ -47,10 +47,18 @@ Examples: +
   use `(var == 7)` instead of  `(7 == var)` +
   use `(function(var) > 7)` instead of `(7 < function(var))`
 
-TRUE, FALSE and NULL
+boolean type
+------------
+Where possible prefer the usage of `bool` type to store boolean.
+
+If not technically possible (ie libJPEG uses `boolean` while GLib uses `gboolean`) uses proper library type.
+
+Constants should be consistent with the type used so `true` and `false` for `bool` type.
+
+true, false and NULL
 --------------------
 
-Use `TRUE`, `FALSE` and `NULL` instead of 1 and 0 in order to improve code readability.
+Use `true`, `false` and `NULL` instead of 1 and 0 in order to improve code readability.
 
 Static storage initialization
 -----------------------------
@@ -167,9 +175,12 @@ for (i = 0; i < 10; ++i) {
     some_func(var, i * i + *ptr, &var, sizeof(var));
 }
 
+Indentation
+-----------
+
 [[function_indentation]]
 Function Indentation
---------------------
+~~~~~~~~~~~~~~~~~~~~
 
 * No spaces between function name to left bracket.
 * Curly bracket start on new line.
@@ -208,7 +219,7 @@ function(type1 arg1, type2 arg2,
 ----
 
 Branching indentation
----------------------
+~~~~~~~~~~~~~~~~~~~~~
 
 * Add space after a branch keyword and after the right bracket.
 * Curly bracket starts on the same line the branch starts.
@@ -275,7 +286,7 @@ default:
 ----
 
 Types indentation
------------------
+~~~~~~~~~~~~~~~~~
 
 [source,c]
 ----
@@ -301,7 +312,7 @@ union {
 ----
 
 Vertical indentation
---------------------
+~~~~~~~~~~~~~~~~~~~~
 
 Use one space no tabs and no vertical alignment.
 [source,c]
@@ -316,7 +327,7 @@ unsigned long f2(int a, char ch);
 ----
 
 Multi line macro indentation
-----------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 [source,c]
 #define MACRO_NAME(a, b, c) {        \
@@ -327,7 +338,7 @@ Multi line macro indentation
 }
 
 Multi line array indentation
-----------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 [source,c]
 char *array[] = {

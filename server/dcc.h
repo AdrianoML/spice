@@ -15,8 +15,9 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef DCC_H_
-# define DCC_H_
+#define DCC_H_
 
 #include <glib-object.h>
 
@@ -24,7 +25,7 @@
 #include "image-cache.h"
 #include "pixmap-cache.h"
 #include "display-limits.h"
-#include "red-channel-client.h"
+#include "common-graphics-channel.h"
 
 G_BEGIN_DECLS
 
@@ -45,18 +46,16 @@ typedef struct DisplayChannelClient DisplayChannelClient;
 typedef struct DisplayChannelClientClass DisplayChannelClientClass;
 typedef struct DisplayChannelClientPrivate DisplayChannelClientPrivate;
 
-struct DisplayChannelClient
-{
-    RedChannelClient parent;
+struct DisplayChannelClient {
+    CommonGraphicsChannelClient parent;
 
     int is_low_bandwidth;
 
     DisplayChannelClientPrivate *priv;
 };
 
-struct DisplayChannelClientClass
-{
-    RedChannelClientClass parent_class;
+struct DisplayChannelClientClass {
+    CommonGraphicsChannelClientClass parent_class;
 };
 
 GType display_channel_client_get_type(void) G_GNUC_CONST;
@@ -134,19 +133,16 @@ DisplayChannelClient*      dcc_new                                   (DisplayCha
                                                                       RedClient *client,
                                                                       RedsStream *stream,
                                                                       int mig_target,
-                                                                      uint32_t *common_caps,
-                                                                      int num_common_caps,
-                                                                      uint32_t *caps,
-                                                                      int num_caps,
+                                                                      RedChannelCapabilities *caps,
                                                                       SpiceImageCompression image_compression,
                                                                       spice_wan_compression_t jpeg_state,
                                                                       spice_wan_compression_t zlib_glz_state);
 void                       dcc_start                                 (DisplayChannelClient *dcc);
 void                       dcc_stop                                  (DisplayChannelClient *dcc);
-int                        dcc_handle_message                        (RedChannelClient *rcc,
-                                                                      uint32_t size,
-                                                                      uint16_t type, void *msg);
-int                        dcc_handle_migrate_data                   (DisplayChannelClient *dcc,
+bool                       dcc_handle_message                        (RedChannelClient *rcc,
+                                                                      uint16_t type,
+                                                                      uint32_t size, void *msg);
+bool                       dcc_handle_migrate_data                   (DisplayChannelClient *dcc,
                                                                       uint32_t size, void *message);
 void                       dcc_push_monitors_config                  (DisplayChannelClient *dcc);
 void                       dcc_destroy_surface                       (DisplayChannelClient *dcc,
@@ -168,7 +164,7 @@ void                       dcc_palette_cache_reset                   (DisplayCha
 void                       dcc_palette_cache_palette                 (DisplayChannelClient *dcc,
                                                                       SpicePalette *palette,
                                                                       uint8_t *flags);
-int                        dcc_pixmap_cache_unlocked_add             (DisplayChannelClient *dcc,
+bool                       dcc_pixmap_cache_unlocked_add             (DisplayChannelClient *dcc,
                                                                       uint64_t id, uint32_t size, int lossy);
 void                       dcc_prepend_drawable                      (DisplayChannelClient *dcc,
                                                                       Drawable *drawable);
@@ -179,10 +175,10 @@ void                       dcc_add_drawable_after                    (DisplayCha
                                                                       RedPipeItem *pos);
 void                       dcc_send_item                             (RedChannelClient *dcc,
                                                                       RedPipeItem *item);
-int                        dcc_clear_surface_drawables_from_pipe     (DisplayChannelClient *dcc,
+bool                       dcc_clear_surface_drawables_from_pipe     (DisplayChannelClient *dcc,
                                                                       int surface_id,
                                                                       int wait_if_used);
-int                        dcc_drawable_is_in_pipe                   (DisplayChannelClient *dcc,
+bool                       dcc_drawable_is_in_pipe                   (DisplayChannelClient *dcc,
                                                                       Drawable *drawable);
 RedPipeItem *              dcc_gl_scanout_item_new                   (RedChannelClient *rcc,
                                                                       void *data, int num);
@@ -202,8 +198,8 @@ uint32_t dcc_get_max_stream_latency(DisplayChannelClient *dcc);
 void dcc_set_max_stream_latency(DisplayChannelClient *dcc, uint32_t latency);
 uint64_t dcc_get_max_stream_bit_rate(DisplayChannelClient *dcc);
 void dcc_set_max_stream_bit_rate(DisplayChannelClient *dcc, uint64_t rate);
-int dcc_config_socket(RedChannelClient *rcc);
 gboolean dcc_is_low_bandwidth(DisplayChannelClient *dcc);
+GArray *dcc_get_preferred_video_codecs_for_encoding(DisplayChannelClient *dcc);
 
 G_END_DECLS
 

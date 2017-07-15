@@ -15,6 +15,7 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef CHAR_DEVICE_H_
 #define CHAR_DEVICE_H_
 
@@ -145,16 +146,13 @@ GType red_char_device_get_type(void) G_GNUC_CONST;
  * */
 
 /* buffer that is used for writing to the device */
+typedef struct RedCharDeviceWriteBufferPrivate RedCharDeviceWriteBufferPrivate;
 typedef struct RedCharDeviceWriteBuffer {
-    int origin;
-    RedClient *client; /* The client that sent the message to the device.
-                          NULL if the server created the message */
-
     uint8_t *buf;
     uint32_t buf_size;
     uint32_t buf_used;
-    uint32_t token_price;
-    uint32_t refs;
+
+    RedCharDeviceWriteBufferPrivate *priv;
 } RedCharDeviceWriteBuffer;
 
 void red_char_device_reset_dev_instance(RedCharDevice *dev,
@@ -166,8 +164,8 @@ void red_char_device_migrate_data_marshall(RedCharDevice *dev,
                                            SpiceMarshaller *m);
 void red_char_device_migrate_data_marshall_empty(SpiceMarshaller *m);
 
-int red_char_device_restore(RedCharDevice *dev,
-                            SpiceMigrateDataCharDevice *mig_data);
+bool red_char_device_restore(RedCharDevice *dev,
+                             SpiceMigrateDataCharDevice *mig_data);
 
 /*
  * Resets write/read queues, and moves that state to being stopped.
@@ -186,13 +184,13 @@ void red_char_device_reset(RedCharDevice *dev);
 
 /* max_send_queue_size = how many messages we can read from the device and enqueue for this client,
  * when we have tokens for other clients and no tokens for this one */
-int red_char_device_client_add(RedCharDevice *dev,
-                               RedClient *client,
-                               int do_flow_control,
-                               uint32_t max_send_queue_size,
-                               uint32_t num_client_tokens,
-                               uint32_t num_send_tokens,
-                               int wait_for_migrate_data);
+bool red_char_device_client_add(RedCharDevice *dev,
+                                RedClient *client,
+                                int do_flow_control,
+                                uint32_t max_send_queue_size,
+                                uint32_t num_client_tokens,
+                                uint32_t num_send_tokens,
+                                int wait_for_migrate_data);
 
 void red_char_device_client_remove(RedCharDevice *dev,
                                    RedClient *client);
@@ -238,4 +236,4 @@ void spicevmc_device_disconnect(RedsState *reds,
 
 SpiceCharDeviceInterface *spice_char_device_get_interface(SpiceCharDeviceInstance *instance);
 
-#endif // CHAR_DEVICE_H_
+#endif /* CHAR_DEVICE_H_ */

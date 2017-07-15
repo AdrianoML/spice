@@ -19,8 +19,8 @@
         yhalperi@redhat.com
 */
 
-#ifndef _H_RED_CHANNEL
-#define _H_RED_CHANNEL
+#ifndef RED_CHANNEL_H_
+#define RED_CHANNEL_H_
 
 #include <pthread.h>
 #include <limits.h>
@@ -34,97 +34,30 @@
 #include "reds-stream.h"
 #include "stat.h"
 #include "red-pipe-item.h"
+#include "red-channel-capabilities.h"
 
 G_BEGIN_DECLS
-
-typedef struct SpiceDataHeaderOpaque SpiceDataHeaderOpaque;
-
-typedef uint16_t (*get_msg_type_proc)(SpiceDataHeaderOpaque *header);
-typedef uint32_t (*get_msg_size_proc)(SpiceDataHeaderOpaque *header);
-typedef void (*set_msg_type_proc)(SpiceDataHeaderOpaque *header, uint16_t type);
-typedef void (*set_msg_size_proc)(SpiceDataHeaderOpaque *header, uint32_t size);
-typedef void (*set_msg_serial_proc)(SpiceDataHeaderOpaque *header, uint64_t serial);
-typedef void (*set_msg_sub_list_proc)(SpiceDataHeaderOpaque *header, uint32_t sub_list);
-
-struct SpiceDataHeaderOpaque {
-    uint8_t *data;
-    uint16_t header_size;
-
-    set_msg_type_proc set_msg_type;
-    set_msg_size_proc set_msg_size;
-    set_msg_serial_proc set_msg_serial;
-    set_msg_sub_list_proc set_msg_sub_list;
-
-    get_msg_type_proc get_msg_type;
-    get_msg_size_proc get_msg_size;
-};
-
-typedef int (*handle_message_proc)(void *opaque,
-                                   uint16_t type, uint32_t size, uint8_t *msg);
-typedef int (*handle_parsed_proc)(void *opaque, uint32_t size, uint16_t type, void *message);
-typedef uint8_t *(*alloc_msg_recv_buf_proc)(void *opaque, uint16_t type, uint32_t size);
-typedef void (*release_msg_recv_buf_proc)(void *opaque,
-                                          uint16_t type, uint32_t size, uint8_t *msg);
-typedef void (*on_incoming_error_proc)(void *opaque);
-typedef void (*on_input_proc)(void *opaque, int n);
-
-typedef struct IncomingHandlerInterface {
-    handle_message_proc handle_message;
-    alloc_msg_recv_buf_proc alloc_msg_buf;
-    on_incoming_error_proc on_error; // recv error or handle_message error
-    release_msg_recv_buf_proc release_msg_buf; // for errors
-    // The following is an optional alternative to handle_message, used if not null
-    spice_parse_channel_func_t parser;
-    handle_parsed_proc handle_parsed;
-    on_input_proc on_input;
-} IncomingHandlerInterface;
-
-typedef int (*get_outgoing_msg_size_proc)(void *opaque);
-typedef void (*prepare_outgoing_proc)(void *opaque, struct iovec *vec, int *vec_size, int pos);
-typedef void (*on_outgoing_error_proc)(void *opaque);
-typedef void (*on_outgoing_block_proc)(void *opaque);
-typedef void (*on_outgoing_msg_done_proc)(void *opaque);
-typedef void (*on_output_proc)(void *opaque, int n);
-
-typedef struct OutgoingHandlerInterface {
-    get_outgoing_msg_size_proc get_msg_size;
-    prepare_outgoing_proc prepare;
-    on_outgoing_error_proc on_error;
-    on_outgoing_block_proc on_block;
-    on_outgoing_msg_done_proc on_msg_done;
-    on_output_proc on_output;
-} OutgoingHandlerInterface;
-/* Red Channel interface */
 
 typedef struct RedChannel RedChannel;
 typedef struct RedChannelClient RedChannelClient;
 typedef struct RedClient RedClient;
 typedef struct MainChannelClient MainChannelClient;
 
-typedef uint8_t *(*channel_alloc_msg_recv_buf_proc)(RedChannelClient *channel,
-                                                    uint16_t type, uint32_t size);
-typedef int (*channel_handle_parsed_proc)(RedChannelClient *rcc, uint32_t size, uint16_t type,
-                                        void *message);
-typedef int (*channel_handle_message_proc)(RedChannelClient *rcc,
-                                           uint16_t type, uint32_t size, uint8_t *msg);
-typedef void (*channel_release_msg_recv_buf_proc)(RedChannelClient *channel,
-                                                  uint16_t type, uint32_t size, uint8_t *msg);
+typedef bool (*channel_handle_message_proc)(RedChannelClient *rcc, uint16_t type,
+                                            uint32_t size, void *msg);
 typedef void (*channel_disconnect_proc)(RedChannelClient *rcc);
-typedef int (*channel_configure_socket_proc)(RedChannelClient *rcc);
+typedef bool (*channel_configure_socket_proc)(RedChannelClient *rcc);
 typedef void (*channel_send_pipe_item_proc)(RedChannelClient *rcc, RedPipeItem *item);
-typedef void (*channel_on_incoming_error_proc)(RedChannelClient *rcc);
-typedef void (*channel_on_outgoing_error_proc)(RedChannelClient *rcc);
 
-typedef int (*channel_handle_migrate_flush_mark_proc)(RedChannelClient *base);
-typedef int (*channel_handle_migrate_data_proc)(RedChannelClient *base,
-                                                uint32_t size, void *message);
+typedef bool (*channel_handle_migrate_flush_mark_proc)(RedChannelClient *base);
+typedef bool (*channel_handle_migrate_data_proc)(RedChannelClient *base,
+                                                 uint32_t size, void *message);
 typedef uint64_t (*channel_handle_migrate_data_get_serial_proc)(RedChannelClient *base,
                                             uint32_t size, void *message);
 
 
 typedef void (*channel_client_connect_proc)(RedChannel *channel, RedClient *client, RedsStream *stream,
-                                            int migration, int num_common_caps, uint32_t *common_caps,
-                                            int num_caps, uint32_t *caps);
+                                            int migration, RedChannelCapabilities *caps);
 typedef void (*channel_client_disconnect_proc)(RedChannelClient *base);
 typedef void (*channel_client_migrate_proc)(RedChannelClient *base);
 
@@ -168,22 +101,22 @@ struct RedChannelClass
 {
     GObjectClass parent_class;
 
-    /* subclasses must implement either handle_message(), or both parser() and
-     * handle_parsed() */
-    channel_handle_message_proc handle_message;
+    /* subclasses must implement handle_message() and optionally parser().
+     * If parser() is implemented, then handle_message() will get passed the
+     * parsed message as its 'msg' argument, otherwise it will be passed
+     * the raw data. In both cases, the 'size' argument is the length of 'msg'
+     * in bytes
+     */
     spice_parse_channel_func_t parser;
-    channel_handle_parsed_proc handle_parsed;
+    channel_handle_message_proc handle_message;
 
     // TODO: add ASSERTS for thread_id  in client and channel calls
     /*
      * callbacks that are triggered from channel client stream events.
      * They are called from the thread that listen to the stream events.
      */
-    channel_configure_socket_proc config_socket;
     channel_disconnect_proc on_disconnect;
     channel_send_pipe_item_proc send_item;
-    channel_alloc_msg_recv_buf_proc alloc_recv_buf;
-    channel_release_msg_recv_buf_proc release_recv_buf;
     channel_handle_migrate_flush_mark_proc handle_migrate_flush_mark;
     channel_handle_migrate_data_proc handle_migrate_data;
     channel_handle_migrate_data_get_serial_proc handle_migrate_data_get_serial;
@@ -195,19 +128,12 @@ struct RedChannelClass
 
 /* Red Channel interface */
 
-typedef struct RedChannelCapabilities {
-    int num_common_caps;
-    uint32_t *common_caps;
-    int num_caps;
-    uint32_t *caps;
-} RedChannelCapabilities;
-
 GType red_channel_get_type(void) G_GNUC_CONST;
 
 void red_channel_add_client(RedChannel *channel, RedChannelClient *rcc);
 void red_channel_remove_client(RedChannel *channel, RedChannelClient *rcc);
 
-void red_channel_set_stat_node(RedChannel *channel, StatNodeRef stat);
+void red_channel_init_stat_node(RedChannel *channel, const RedStatNode *parent, const char *name);
 
 void red_channel_register_client_cbs(RedChannel *channel, const ClientCbs *client_cbs, gpointer cbs_data);
 // caps are freed when the channel is destroyed
@@ -219,7 +145,7 @@ int red_channel_is_connected(RedChannel *channel);
 /* seamless migration is supported for only one client. This routine
  * checks if the only channel client associated with channel is
  * waiting for migration data */
-int red_channel_is_waiting_for_migrate_data(RedChannel *channel);
+bool red_channel_is_waiting_for_migrate_data(RedChannel *channel);
 
 /*
  * the disconnect callback is called from the channel's thread,
@@ -231,8 +157,7 @@ int red_channel_is_waiting_for_migrate_data(RedChannel *channel);
 void red_channel_destroy(RedChannel *channel);
 
 /* return true if all the channel clients support the cap */
-int red_channel_test_remote_common_cap(RedChannel *channel, uint32_t cap);
-int red_channel_test_remote_cap(RedChannel *channel, uint32_t cap);
+bool red_channel_test_remote_cap(RedChannel *channel, uint32_t cap);
 
 /* should be called when a new channel is ready to send messages */
 void red_channel_init_outgoing_messages_window(RedChannel *channel);
@@ -250,12 +175,7 @@ void red_channel_pipes_add_type(RedChannel *channel, int pipe_item_type);
 void red_channel_pipes_add_empty_msg(RedChannel *channel, int msg_type);
 
 /* return TRUE if all of the connected clients to this channel are blocked */
-int red_channel_all_blocked(RedChannel *channel);
-
-/* return TRUE if any of the connected clients to this channel are blocked */
-int red_channel_any_blocked(RedChannel *channel);
-
-int red_channel_no_item_being_sent(RedChannel *channel);
+bool red_channel_all_blocked(RedChannel *channel);
 
 // TODO: unstaticed for display/cursor channels. they do some specific pushes not through
 // adding elements or on events. but not sure if this is actually required (only result
@@ -275,8 +195,8 @@ void red_channel_send(RedChannel *channel);
 // For red_worker
 void red_channel_disconnect(RedChannel *channel);
 void red_channel_connect(RedChannel *channel, RedClient *client,
-                         RedsStream *stream, int migration, int num_common_caps,
-                         uint32_t *common_caps, int num_caps, uint32_t *caps);
+                         RedsStream *stream, int migration,
+                         RedChannelCapabilities *caps);
 
 /* return the sum of all the rcc pipe size */
 uint32_t red_channel_max_pipe_size(RedChannel *channel);
@@ -297,16 +217,10 @@ struct RedsState* red_channel_get_server(RedChannel *channel);
 SpiceCoreInterfaceInternal* red_channel_get_core_interface(RedChannel *channel);
 
 /* channel callback function */
-int red_channel_config_socket(RedChannel *self, RedChannelClient *rcc);
 void red_channel_on_disconnect(RedChannel *self, RedChannelClient *rcc);
 void red_channel_send_item(RedChannel *self, RedChannelClient *rcc, RedPipeItem *item);
 void red_channel_reset_thread_id(RedChannel *self);
-StatNodeRef red_channel_get_stat_node(RedChannel *channel);
-
-/* FIXME: do these even need to be in RedChannel? It's really only used in
- * RedChannelClient. Needs refactoring */
-IncomingHandlerInterface* red_channel_get_incoming_handler(RedChannel *self);
-OutgoingHandlerInterface* red_channel_get_outgoing_handler(RedChannel *self);
+const RedStatNode *red_channel_get_stat_node(RedChannel *channel);
 
 const RedChannelCapabilities* red_channel_get_local_capabilities(RedChannel *self);
 
@@ -318,8 +232,8 @@ const RedChannelCapabilities* red_channel_get_local_capabilities(RedChannel *sel
  * Return: TRUE if waiting succeeded. FALSE if timeout expired.
  */
 
-int red_channel_wait_all_sent(RedChannel *channel,
-                              int64_t timeout);
+bool red_channel_wait_all_sent(RedChannel *channel,
+                               int64_t timeout);
 
 /* wrappers for client callbacks */
 void red_channel_migrate_client(RedChannel *channel, RedChannelClient *rcc);
@@ -329,4 +243,4 @@ void red_channel_disconnect_client(RedChannel *channel, RedChannelClient *rcc);
 
 G_END_DECLS
 
-#endif
+#endif /* RED_CHANNEL_H_ */

@@ -15,8 +15,8 @@
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef _H_RED_DISPATCHER
-#define _H_RED_DISPATCHER
+#ifndef RED_DISPATCHER_H_
+#define RED_DISPATCHER_H_
 
 #include "red-channel.h"
 #include "spice-qxl.h"
@@ -126,11 +126,8 @@ enum {
 typedef struct RedWorkerMessageDisplayConnect {
     RedClient * client;
     RedsStream * stream;
-    uint32_t *common_caps; // red_worker should free
-    uint32_t *caps;        // red_worker should free
+    RedChannelCapabilities caps;   // red_worker should reset
     int migration;
-    int num_common_caps;
-    int num_caps;
 } RedWorkerMessageDisplayConnect;
 
 typedef struct RedWorkerMessageDisplayDisconnect {
@@ -145,10 +142,7 @@ typedef struct RedWorkerMessageCursorConnect {
     RedClient *client;
     RedsStream *stream;
     int migration;
-    uint32_t *common_caps; // red_worker should free
-    int num_common_caps;
-    uint32_t *caps;        // red_worker should free
-    int num_caps;
+    RedChannelCapabilities caps;   // red_worker should reset
 } RedWorkerMessageCursorConnect;
 
 typedef struct RedWorkerMessageCursorDisconnect {
@@ -309,4 +303,4 @@ enum {
 
 void red_qxl_clear_pending(QXLState *qxl_state, int pending);
 
-#endif
+#endif /* RED_DISPATCHER_H_ */

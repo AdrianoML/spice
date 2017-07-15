@@ -1,6 +1,16 @@
 NULL =
 
+@VALGRIND_CHECK_RULES@
+VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/server/tests/valgrind/glib.supp
+EXTRA_DIST =				\
+	$(VALGRIND_SUPPRESSIONS_FILES)	\
+	pki/ca-cert.pem			\
+	pki/server-cert.pem		\
+	pki/server-key.pem		\
+	$(NULL)
+
 AM_CPPFLAGS =					\
+	-DSPICE_TOP_SRCDIR=\"$(abs_top_srcdir)\"\
 	-I$(top_srcdir)				\
 	-I$(top_srcdir)/server			\
 	-I$(top_builddir)/server		\
@@ -25,6 +35,8 @@ libtest_a_SOURCES =				\
 	basic-event-loop.h			\
 	test-display-base.c			\
 	test-display-base.h			\
+	test-glib-compat.c			\
+	test-glib-compat.h			\
 	$(NULL)
 
 LDADD =								\
@@ -45,6 +57,8 @@ check_PROGRAMS =				\
 	test-loop				\
 	test-qxl-parsing			\
 	test-stat-file				\
+	test-leaks				\
+	test-vdagent				\
 	$(NULL)
 
 noinst_PROGRAMS =				\
@@ -56,15 +70,24 @@ noinst_PROGRAMS =				\
 	test-playback				\
 	test-display-resolution-changes		\
 	test-two-servers			\
-	test-vdagent				\
 	test-display-width-stride		\
 	spice-server-replay			\
-	test-gst				\
 	$(check_PROGRAMS)			\
 	$(NULL)
 
+if HAVE_GSTREAMER
+noinst_PROGRAMS += test-gst
+endif
+
 TESTS = $(check_PROGRAMS)			\
 	$(NULL)
+
+if ENABLE_EXTRA_CHECKS
+if HAVE_GSTREAMER_1_0
+TESTS += video-encoders
+endif
+endif
+EXTRA_DIST += video-encoders
 
 noinst_LIBRARIES += \
 	libtest-stat1.a \
@@ -109,6 +132,17 @@ libtest_stat4_a_CPPFLAGS = $(AM_CPPFLAGS) -DTEST_COMPRESS_STAT=1 -DTEST_RED_WORK
 
 test_qxl_parsing_LDADD = ../libserver.la $(LDADD)
 
+# Fallback implementations are provided for older glibs for the recent glib
+# methods this test is using, so no need to warn about them
+test_vdagent_CPPFLAGS =			\
+	$(AM_CPPFLAGS)			\
+	-UGLIB_VERSION_MIN_REQUIRED	\
+	-UGLIB_VERSION_MAX_ALLOWED	\
+	$(NULL)
+test_codecs_parsing_CPPFLAGS = $(test_vdagent_CPPFLAGS)
+test_qxl_parsing_CPPFLAGS = $(test_vdagent_CPPFLAGS)
+
+if HAVE_GSTREAMER
 test_gst_SOURCES = test-gst.c \
 	$(NULL)
 test_gst_CPPFLAGS = \
@@ -116,3 +150,4 @@ test_gst_CPPFLAGS = \
 	$(GSTREAMER_0_10_CFLAGS)		\
 	$(GSTREAMER_1_0_CFLAGS)			\
 	$(NULL)
+endif

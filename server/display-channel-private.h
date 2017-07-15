@@ -20,6 +20,15 @@
 
 #include "display-channel.h"
 
+#define NUM_DRAWABLES 1000
+typedef struct _Drawable _Drawable;
+struct _Drawable {
+    union {
+        Drawable drawable;
+        _Drawable *next;
+    } u;
+};
+
 struct DisplayChannelPrivate
 {
     DisplayChannel *pub;
@@ -32,8 +41,11 @@ struct DisplayChannelPrivate
     int enable_jpeg;
     int enable_zlib_glz_wrap;
 
-    Ring current_list; // of TreeItem
-    uint32_t current_size;
+    /* A ring of pending drawables for this DisplayChannel, regardless of which
+     * surface they're associated with. This list is mainly used to flush older
+     * drawables when we need to make room for new drawables.  The ring is
+     * maintained in order of age, the tail being the oldest drawable */
+    Ring current_list;
 
     uint32_t drawable_count;
     _Drawable drawables[NUM_DRAWABLES];
@@ -65,11 +77,9 @@ struct DisplayChannelPrivate
     uint32_t add_count;
     uint32_t add_with_shadow_count;
 #endif
-#ifdef RED_STATISTICS
-    uint64_t *cache_hits_counter;
-    uint64_t *add_to_cache_counter;
-    uint64_t *non_cache_counter;
-#endif
+    RedStatCounter cache_hits_counter;
+    RedStatCounter add_to_cache_counter;
+    RedStatCounter non_cache_counter;
     ImageEncoderSharedData encoder_shared_data;
 };
 

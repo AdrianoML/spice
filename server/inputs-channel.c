@@ -19,12 +19,7 @@
 #include <config.h>
 #endif
 
-#include <netinet/in.h> // IPPROTO_TCP
-#include <netinet/tcp.h> // TCP_NODELAY
-#include <fcntl.h>
 #include <stddef.h> // NULL
-#include <errno.h>
-#include <stdbool.h>
 #include <spice/macros.h>
 #include <spice/vd_agent.h>
 #include <spice/protocol.h>
@@ -47,22 +42,10 @@
 #include "migration-protocol.h"
 #include "utils.h"
 
-// TODO: RECEIVE_BUF_SIZE used to be the same for inputs_channel and main_channel
-// since it was defined once in reds.c which contained both.
-// Now that they are split we can give a more fitting value for inputs - what
-// should it be?
-#define REDS_AGENT_WINDOW_SIZE 10
-#define REDS_NUM_INTERNAL_AGENT_MESSAGES 1
-
-// approximate max receive message size
-#define RECEIVE_BUF_SIZE \
-    (4096 + (REDS_AGENT_WINDOW_SIZE + REDS_NUM_INTERNAL_AGENT_MESSAGES) * SPICE_AGENT_MAX_DATA_SIZE)
-
 struct InputsChannel
 {
     RedChannel parent;
 
-    uint8_t recv_buf[RECEIVE_BUF_SIZE];
     VDAgentMouseState mouse_state;
     int src_during_migrate;
     SpiceTimer *key_modifiers_timer;
@@ -140,6 +123,7 @@ typedef struct RedInputsInitPipeItem {
 
 #define KEY_MODIFIERS_TTL (MSEC_PER_SEC * 2)
 
+#define SCAN_CODE_RELEASE 0x80
 #define SCROLL_LOCK_SCAN_CODE 0x46
 #define NUM_LOCK_SCAN_CODE 0x45
 #define CAPS_LOCK_SCAN_CODE 0x3a
@@ -155,26 +139,6 @@ void inputs_channel_set_tablet_logical_size(InputsChannel *inputs, int x_res, in
 const VDAgentMouseState *inputs_channel_get_mouse_state(InputsChannel *inputs)
 {
     return &inputs->mouse_state;
-}
-
-static uint8_t *inputs_channel_alloc_msg_rcv_buf(RedChannelClient *rcc,
-                                                 uint16_t type,
-                                                 uint32_t size)
-{
-    InputsChannel *inputs_channel = INPUTS_CHANNEL(red_channel_client_get_channel(rcc));
-
-    if (size > RECEIVE_BUF_SIZE) {
-        spice_printerr("error: too large incoming message");
-        return NULL;
-    }
-    return inputs_channel->recv_buf;
-}
-
-static void inputs_channel_release_msg_rcv_buf(RedChannelClient *rcc,
-                                               uint16_t type,
-                                               uint32_t size,
-                                               uint8_t *msg)
-{
 }
 
 #define OUTGOING_OK 0
@@ -211,7 +175,7 @@ static void kbd_push_scan(SpiceKbdInstance *sin, uint8_t scan)
     } else {
         if (sin->st->push_ext_type == 0 || sin->st->push_ext_type == 0xe0) {
             bool *state = sin->st->push_ext_type ? sin->st->key_ext : sin->st->key;
-            state[scan & 0x7f] = !(scan & 0x80);
+            state[scan & 0x7f] = !(scan & SCAN_CODE_RELEASE);
         }
         sin->st->push_ext_type = 0;
     }
@@ -279,8 +243,8 @@ static void inputs_channel_send_item(RedChannelClient *rcc, RedPipeItem *base)
     red_channel_client_begin_send_message(rcc);
 }
 
-static int inputs_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, uint16_t type,
-                                        void *message)
+static bool inputs_channel_handle_message(RedChannelClient *rcc, uint16_t type,
+                                          uint32_t size, void *message)
 {
     InputsChannel *inputs_channel = INPUTS_CHANNEL(red_channel_client_get_channel(rcc));
     InputsChannelClient *icc = INPUTS_CHANNEL_CLIENT(rcc);
@@ -295,8 +259,8 @@ static int inputs_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, ui
             key_down->code == SCROLL_LOCK_SCAN_CODE) {
             activate_modifiers_watch(inputs_channel, reds);
         }
-        /* fallthrough */
     }
+        /* fallthrough */
     case SPICE_MSGC_INPUTS_KEY_UP: {
         SpiceMsgcKeyUp *key_up = message;
         for (i = 0; i < 4; i++) {
@@ -418,17 +382,17 @@ static int inputs_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, ui
         if ((modifiers->modifiers & SPICE_KEYBOARD_MODIFIER_FLAGS_SCROLL_LOCK) !=
             (leds & SPICE_KEYBOARD_MODIFIER_FLAGS_SCROLL_LOCK)) {
             kbd_push_scan(keyboard, SCROLL_LOCK_SCAN_CODE);
-            kbd_push_scan(keyboard, SCROLL_LOCK_SCAN_CODE | 0x80);
+            kbd_push_scan(keyboard, SCROLL_LOCK_SCAN_CODE | SCAN_CODE_RELEASE);
         }
         if ((modifiers->modifiers & SPICE_KEYBOARD_MODIFIER_FLAGS_NUM_LOCK) !=
             (leds & SPICE_KEYBOARD_MODIFIER_FLAGS_NUM_LOCK)) {
             kbd_push_scan(keyboard, NUM_LOCK_SCAN_CODE);
-            kbd_push_scan(keyboard, NUM_LOCK_SCAN_CODE | 0x80);
+            kbd_push_scan(keyboard, NUM_LOCK_SCAN_CODE | SCAN_CODE_RELEASE);
         }
         if ((modifiers->modifiers & SPICE_KEYBOARD_MODIFIER_FLAGS_CAPS_LOCK) !=
             (leds & SPICE_KEYBOARD_MODIFIER_FLAGS_CAPS_LOCK)) {
             kbd_push_scan(keyboard, CAPS_LOCK_SCAN_CODE);
-            kbd_push_scan(keyboard, CAPS_LOCK_SCAN_CODE | 0x80);
+            kbd_push_scan(keyboard, CAPS_LOCK_SCAN_CODE | SCAN_CODE_RELEASE);
         }
         activate_modifiers_watch(inputs_channel, reds);
         break;
@@ -436,7 +400,7 @@ static int inputs_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, ui
     case SPICE_MSGC_DISCONNECTING:
         break;
     default:
-        return red_channel_client_handle_message(rcc, size, type, message);
+        return red_channel_client_handle_message(rcc, type, size, message);
     }
     return TRUE;
 }
@@ -457,7 +421,7 @@ static void inputs_release_keys(InputsChannel *inputs)
             continue;
 
         st->key[i] = FALSE;
-        kbd_push_scan(keyboard, i | 0x80);
+        kbd_push_scan(keyboard, i | SCAN_CODE_RELEASE);
     }
 
     for (i = 0; i < SPICE_N_ELEMENTS(st->key_ext); i++) {
@@ -466,7 +430,7 @@ static void inputs_release_keys(InputsChannel *inputs)
 
         st->key_ext[i] = FALSE;
         kbd_push_scan(keyboard, 0xe0);
-        kbd_push_scan(keyboard, i | 0x80);
+        kbd_push_scan(keyboard, i | SCAN_CODE_RELEASE);
     }
 }
 
@@ -488,26 +452,9 @@ static void inputs_pipe_add_init(RedChannelClient *rcc)
     red_channel_client_pipe_add_push(rcc, &item->base);
 }
 
-static int inputs_channel_config_socket(RedChannelClient *rcc)
-{
-    int delay_val = 1;
-    RedsStream *stream = red_channel_client_get_stream(rcc);
-
-    if (setsockopt(stream->socket, IPPROTO_TCP, TCP_NODELAY,
-            &delay_val, sizeof(delay_val)) == -1) {
-        if (errno != ENOTSUP && errno != ENOPROTOOPT) {
-            spice_printerr("setsockopt failed, %s", strerror(errno));
-            return FALSE;
-        }
-    }
-
-    return TRUE;
-}
-
 static void inputs_connect(RedChannel *channel, RedClient *client,
                            RedsStream *stream, int migration,
-                           int num_common_caps, uint32_t *common_caps,
-                           int num_caps, uint32_t *caps)
+                           RedChannelCapabilities *caps)
 {
     RedChannelClient *rcc;
 
@@ -517,9 +464,7 @@ static void inputs_connect(RedChannel *channel, RedClient *client,
     }
 
     spice_printerr("inputs channel client create");
-    rcc = inputs_channel_client_create(channel, client, stream, FALSE,
-                                       num_common_caps, common_caps,
-                                       num_caps, caps);
+    rcc = inputs_channel_client_create(channel, client, stream, caps);
     if (!rcc) {
         return;
     }
@@ -554,15 +499,15 @@ static void key_modifiers_sender(void *opaque)
     inputs_channel_push_keyboard_modifiers(inputs, kbd_get_leds(inputs_channel_get_keyboard(inputs)));
 }
 
-static int inputs_channel_handle_migrate_flush_mark(RedChannelClient *rcc)
+static bool inputs_channel_handle_migrate_flush_mark(RedChannelClient *rcc)
 {
     red_channel_client_pipe_add_type(rcc, RED_PIPE_ITEM_MIGRATE_DATA);
     return TRUE;
 }
 
-static int inputs_channel_handle_migrate_data(RedChannelClient *rcc,
-                                              uint32_t size,
-                                              void *message)
+static bool inputs_channel_handle_migrate_data(RedChannelClient *rcc,
+                                               uint32_t size,
+                                               void *message)
 {
     InputsChannelClient *icc = INPUTS_CHANNEL_CLIENT(rcc);
     InputsChannel *inputs = INPUTS_CHANNEL(red_channel_client_get_channel(rcc));
@@ -646,14 +591,11 @@ inputs_channel_class_init(InputsChannelClass *klass)
     object_class->finalize = inputs_channel_finalize;
 
     channel_class->parser = spice_get_client_channel_parser(SPICE_CHANNEL_INPUTS, NULL);
-    channel_class->handle_parsed = inputs_channel_handle_parsed;
+    channel_class->handle_message = inputs_channel_handle_message;
 
     /* channel callbacks */
-    channel_class->config_socket = inputs_channel_config_socket;
     channel_class->on_disconnect = inputs_channel_on_disconnect;
     channel_class->send_item = inputs_channel_send_item;
-    channel_class->alloc_recv_buf = inputs_channel_alloc_msg_rcv_buf;
-    channel_class->release_recv_buf = inputs_channel_release_msg_rcv_buf;
     channel_class->handle_migrate_data = inputs_channel_handle_migrate_data;
     channel_class->handle_migrate_flush_mark = inputs_channel_handle_migrate_flush_mark;
 }

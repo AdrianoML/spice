@@ -69,6 +69,57 @@ typedef struct {
     SpiceBitmap *bitmap;
 } TestFrame;
 
+#ifdef HAVE_GSTREAMER_0_10
+
+#define VIDEOCONVERT "ffmpegcolorspace"
+#define BGRx_CAPS "caps=video/x-raw-rgb,bpp=32,depth=24,blue_mask=-16777216,green_mask=16711680,red_mask=65280"
+
+typedef GstBuffer GstSample;
+#define gst_sample_get_buffer(s) (s)
+#define gst_sample_get_caps(s) GST_BUFFER_CAPS(s)
+#define gst_sample_unref(s) gst_buffer_unref(s)
+#define gst_app_sink_pull_sample(s) gst_app_sink_pull_buffer(s)
+typedef struct {
+    uint8_t *data;
+} GstMapInfo;
+#define GST_MAP_READ 1
+static void
+gst_buffer_unmap(GstBuffer *buffer, GstMapInfo *mapinfo)
+{ }
+
+static gboolean
+gst_buffer_map(GstBuffer *buffer, GstMapInfo *mapinfo, int flags)
+{
+    mapinfo->data = GST_BUFFER_DATA(buffer);
+    return mapinfo->data != NULL;
+}
+
+static GstBuffer*
+gst_buffer_new_wrapped_full(int flags SPICE_GNUC_UNUSED, gpointer data, gsize maxsize,
+                            gsize offset, gsize size,
+                            gpointer user_data, GDestroyNotify notify)
+{
+    GstBuffer *buffer = gst_buffer_new();
+
+    buffer->malloc_data = user_data;
+    GST_BUFFER_FREE_FUNC(buffer) = notify;
+    GST_BUFFER_DATA(buffer) = (uint8_t *) data + offset;
+    GST_BUFFER_SIZE(buffer) = size;
+
+    return buffer;
+}
+
+#define GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS 0
+
+#define gst_bus_set_sync_handler(bus, proc, param, destroy) G_STMT_START {\
+    SPICE_VERIFY(destroy == NULL); \
+    gst_bus_set_sync_handler(bus, proc, param); \
+} G_STMT_END
+#else
+#define VIDEOCONVERT "videoconvert"
+#define BGRx_CAPS "caps=video/x-raw,format=BGRx"
+#endif
+
 typedef void (*SampleProc)(GstSample *sample, void *param);
 
 typedef struct {
@@ -102,6 +153,11 @@ static SpiceRect clipping_rect;
 static pthread_mutex_t frame_queue_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t frame_queue_cond = PTHREAD_COND_INITIALIZER;
 static GQueue frame_queue = G_QUEUE_INIT;
+// input frames are counted
+static unsigned input_frame_index = 0;
+// file output for report informations like
+// frame output size
+static FILE *file_report;
 static TestPipeline *input_pipeline, *output_pipeline;
 static pthread_mutex_t eos_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t eos_cond = PTHREAD_COND_INITIALIZER;
@@ -133,6 +189,8 @@ static double compute_psnr(SpiceBitmap *bitmap1, int32_t x1, int32_t y1,
 static void
 input_frames(GstSample *sample, void *param)
 {
+    unsigned curr_frame_index = input_frame_index++;
+
     spice_assert(video_encoder && sample);
 
     if (SPICE_UNLIKELY(!clipping_type_computed)) {
@@ -162,6 +220,13 @@ input_frames(GstSample *sample, void *param)
         pthread_mutex_unlock(&frame_queue_mtx);
         spice_assert(p_outbuf);
         pipeline_send_raw_data(output_pipeline, p_outbuf);
+        if (file_report) {
+            fprintf(file_report,
+                    "Frame: %u\n"
+                    "Output size: %u\n",
+                    curr_frame_index,
+                    (unsigned) p_outbuf->size);
+        }
         break;
     case VIDEO_ENCODER_FRAME_UNSUPPORTED:
         // ?? what to do ??
@@ -170,6 +235,12 @@ input_frames(GstSample *sample, void *param)
         spice_assert(0);
         break;
     case VIDEO_ENCODER_FRAME_DROP:
+        if (file_report) {
+            fprintf(file_report,
+                    "Frame: %u\n"
+                    "Output size: 0\n",
+                    curr_frame_index);
+        }
         break;
     default:
         // invalid value returned
@@ -229,8 +300,14 @@ static const EncoderInfo encoder_infos[] = {
       "caps=image/jpeg", "jpegdec" },
     { "gstreamer:vp8",   gstreamer_encoder_new, SPICE_VIDEO_CODEC_TYPE_VP8,
       "caps=video/x-vp8", "vp8dec" },
+    { "gstreamer:vp9",   gstreamer_encoder_new, SPICE_VIDEO_CODEC_TYPE_VP9,
+      "caps=video/x-vp9", "vp9dec" },
     { "gstreamer:h264",  gstreamer_encoder_new, SPICE_VIDEO_CODEC_TYPE_H264,
+#ifdef HAVE_GSTREAMER_0_10
+      "", "h264parse ! ffdec_h264" },
+#else
       "", "h264parse ! avdec_h264" },
+#endif
     { NULL, NULL, SPICE_VIDEO_CODEC_TYPE_ENUM_END, NULL, NULL }
 };
 
@@ -239,6 +316,7 @@ int main(int argc, char *argv[])
     gchar *input_pipeline_desc = NULL;
     const gchar *image_format = "32BIT";
     const gchar *encoder_name = "mjpeg";
+    gchar *file_report_name = NULL;
     gboolean use_hw_encoder = FALSE; // TODO use
     const gchar *clipping = "(0,0)x(100%,100%)";
 
@@ -270,6 +348,8 @@ int main(int argc, char *argv[])
           "Minimum PSNR accepted", "PSNR" },
         { "split-lines", 0, 0, G_OPTION_ARG_INT, &image_split_lines,
           "Split image into different chunks every LINES lines", "LINES" },
+        { "report", 0, 0, G_OPTION_ARG_FILENAME, &file_report_name,
+          "Report statistics to file", "FILENAME" },
         { NULL }
     };
 
@@ -315,6 +395,14 @@ int main(int argc, char *argv[])
     if (image_split_lines < 1) {
         g_printerr("Invalid --split-lines option: %d\n", image_split_lines);
         exit(1);
+    }
+
+    if (file_report_name) {
+        file_report = fopen(file_report_name, "w");
+        if (!file_report) {
+            g_printerr("Error opening file %s for report\n", file_report_name);
+            exit(1);
+        }
     }
 
     gst_init(&argc, &argv);
@@ -505,7 +593,9 @@ create_pipeline(const char *desc, SampleProc sample_proc, void *param)
         return NULL;
     }
 
-    GstAppSinkCallbacks appsink_cbs = { NULL, NULL, new_sample, {NULL} };
+    static const GstAppSinkCallbacks appsink_cbs_template =
+        { NULL, NULL, new_sample, ._gst_reserved={NULL} };
+    GstAppSinkCallbacks appsink_cbs = appsink_cbs_template;
     gst_app_sink_set_callbacks(pipeline->appsink, &appsink_cbs, pipeline, NULL);
 
     GstBus *bus = gst_element_get_bus(pipeline->gst_pipeline);
@@ -526,7 +616,7 @@ create_output_pipeline(const EncoderInfo *encoder, SampleProc sample_proc, void 
 {
     gchar *desc =
         g_strdup_printf("appsrc name=src is-live=true format=time max-bytes=0 block=true "
-                        "%s ! %s ! videoconvert ! appsink name=sink caps=video/x-raw,format=BGRx"
+                        "%s ! %s ! " VIDEOCONVERT " ! appsink name=sink " BGRx_CAPS
                         " sync=false drop=false", encoder->caps, encoder->decoder);
 
     TestPipeline *pipeline = create_pipeline(desc, sample_proc, param);
@@ -543,7 +633,7 @@ static void
 create_input_pipeline(const char *input_pipeline_desc, SampleProc sample_proc, void *param)
 {
     gchar *desc =
-        g_strdup_printf("%s ! appsink name=sink caps=video/x-raw,format=BGRx"
+        g_strdup_printf("%s ! appsink name=sink " BGRx_CAPS
                         " sync=false drop=false", input_pipeline_desc);
 
     TestPipeline *pipeline = create_pipeline(desc, sample_proc, param);
@@ -573,7 +663,9 @@ pipeline_send_raw_data(TestPipeline *pipeline, VideoBuffer *video_buffer)
                                     video_buffer, (void (*)(void*)) video_buffer_release);
 
     GST_BUFFER_DURATION(buffer) = GST_CLOCK_TIME_NONE;
+#ifndef HAVE_GSTREAMER_0_10
     GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+#endif
 
     if (gst_app_src_push_buffer(pipeline->appsrc, buffer) != GST_FLOW_OK) {
         g_printerr("GStreamer error: unable to push frame of size %u\n", video_buffer->size);

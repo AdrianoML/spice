@@ -26,6 +26,8 @@
 #include "glz-encoder-dict.h"
 #include "glz-encoder-priv.h"
 
+static void glz_enc_dictionary_reset(GlzEncDictContext *opaque_dict, GlzEncoderUsrContext *usr);
+
 /* turning all used images to free ones. If they are alive, calling the free_image callback for
    each one */
 static inline void __glz_dictionary_window_reset_images(SharedDictionary *dict)
@@ -46,7 +48,7 @@ static inline void __glz_dictionary_window_reset_images(SharedDictionary *dict)
 }
 
 /* allocate window fields (no reset)*/
-static int glz_dictionary_window_create(SharedDictionary *dict, uint32_t size)
+static bool glz_dictionary_window_create(SharedDictionary *dict, uint32_t size)
 {
     if (size > LZ_MAX_WINDOW_SIZE) {
         return FALSE;
@@ -201,7 +203,8 @@ GlzEncDictContext *glz_enc_dictionary_restore(GlzEncDictRestoreData *restore_dat
     return ((GlzEncDictContext *)ret);
 }
 
-void glz_enc_dictionary_reset(GlzEncDictContext *opaque_dict, GlzEncoderUsrContext *usr)
+/*  NOTE - you should use this routine only when no encoder uses the dictionary. */
+static void glz_enc_dictionary_reset(GlzEncDictContext *opaque_dict, GlzEncoderUsrContext *usr)
 {
     SharedDictionary *dict = (SharedDictionary *)opaque_dict;
     dict->cur_usr = usr;
@@ -424,7 +427,7 @@ static WindowImage *glz_dictionary_window_get_new_head(SharedDictionary *dict, i
     return cur_head;
 }
 
-static inline int glz_dictionary_is_in_use(SharedDictionary *dict)
+static inline bool glz_dictionary_is_in_use(SharedDictionary *dict)
 {
     uint32_t i = 0;
     for (i = 0; i < dict->max_encoders; i++) {

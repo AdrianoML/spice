@@ -15,8 +15,9 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef CURSOR_CHANNEL_H_
-# define CURSOR_CHANNEL_H_
+#define CURSOR_CHANNEL_H_
 
 #include "common-graphics-channel.h"
 #include "red-parse-qxl.h"
@@ -75,8 +76,7 @@ void                 cursor_channel_set_mouse_mode(CursorChannel *cursor, uint32
 void                 cursor_channel_connect     (CursorChannel *cursor, RedClient *client,
                                                  RedsStream *stream,
                                                  int migrate,
-                                                 uint32_t *common_caps, int num_common_caps,
-                                                 uint32_t *caps, int num_caps);
+                                                 RedChannelCapabilities *caps);
 
 /**
  * Migrate a client channel from a CursorChannel.

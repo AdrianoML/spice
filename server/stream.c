@@ -141,7 +141,7 @@ void display_channel_init_streams(DisplayChannel *display)
     ring_init(&display->priv->streams);
     display->priv->free_streams = NULL;
     for (i = 0; i < NUM_STREAMS; i++) {
-        Stream *stream = &display->priv->streams_buf[i];
+        Stream *stream = display_channel_get_nth_stream(display, i);
         ring_item_init(&stream->link);
         stream_free(display, stream);
     }
@@ -316,6 +316,7 @@ static void attach_stream(DisplayChannel *display, Drawable *drawable, Stream *s
             region_or(&agent->clip, &drawable->tree_item.base.rgn);
             dcc_stream_agent_clip(dcc, agent);
         }
+        region_destroy(&clip_in_draw_dest);
 #ifdef STREAM_STATS
         agent->stats.num_input_frames++;
 #endif
@@ -421,19 +422,19 @@ static void display_channel_create_stream(DisplayChannel *display, Drawable *dra
         dcc_create_stream(dcc, stream);
     }
     spice_debug("stream %d %dx%d (%d, %d) (%d, %d) %u fps",
-                (int)(stream - display->priv->streams_buf), stream->width,
+                display_channel_get_stream_id(display, stream), stream->width,
                 stream->height, stream->dest_area.left, stream->dest_area.top,
                 stream->dest_area.right, stream->dest_area.bottom,
                 stream->input_fps);
 }
 
 // returns whether a stream was created
-static int stream_add_frame(DisplayChannel *display,
-                            Drawable *frame_drawable,
-                            red_time_t first_frame_time,
-                            int frames_count,
-                            int gradual_frames_count,
-                            int last_gradual_frame)
+static bool stream_add_frame(DisplayChannel *display,
+                             Drawable *frame_drawable,
+                             red_time_t first_frame_time,
+                             int frames_count,
+                             int gradual_frames_count,
+                             int last_gradual_frame)
 {
     update_copy_graduality(display, frame_drawable);
     frame_drawable->first_frame_time = first_frame_time;
@@ -687,13 +688,12 @@ static VideoEncoder* dcc_create_video_encoder(DisplayChannelClient *dcc,
                                               uint64_t starting_bit_rate,
                                               VideoEncoderRateControlCbs *cbs)
 {
-    DisplayChannel *display = DCC_TO_DC(dcc);
     RedChannelClient *rcc = RED_CHANNEL_CLIENT(dcc);
-    int client_has_multi_codec = red_channel_client_test_remote_cap(rcc, SPICE_DISPLAY_CAP_MULTI_CODEC);
+    bool client_has_multi_codec = red_channel_client_test_remote_cap(rcc, SPICE_DISPLAY_CAP_MULTI_CODEC);
     int i;
     GArray *video_codecs;
 
-    video_codecs = display_channel_get_video_codecs(display);
+    video_codecs = dcc_get_preferred_video_codecs_for_encoding(dcc);
     for (i = 0; i < video_codecs->len; i++) {
         RedVideoCodec* video_codec = &g_array_index (video_codecs, RedVideoCodec, i);
 
@@ -914,7 +914,7 @@ void stream_detach_and_stop(DisplayChannel *display)
 {
     RingItem *stream_item;
 
-    spice_debug(NULL);
+    spice_debug("trace");
     while ((stream_item = ring_get_head(&display->priv->streams))) {
         Stream *stream = SPICE_CONTAINEROF(stream_item, Stream, link);
 

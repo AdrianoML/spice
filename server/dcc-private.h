@@ -15,6 +15,7 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef DCC_PRIVATE_H_
 #define DCC_PRIVATE_H_
 
@@ -50,6 +51,12 @@ struct DisplayChannelClientPrivate
         uint64_t pixmap_cache_items[MAX_DRAWABLE_PIXMAP_CACHE_ITEMS];
         int num_pixmap_cache_items;
     } send_data;
+
+    /* Host preferred video-codec order sorted with client preferred */
+    GArray *preferred_video_codecs;
+    /* Array with SPICE_VIDEO_CODEC_TYPE_ENUM_END elements, with the client
+     * preference order (index) as value */
+    GArray *client_preferred_video_codecs;
 
     uint8_t surface_client_created[NUM_SURFACES];
     QRegion surface_client_lossy_region[NUM_SURFACES];

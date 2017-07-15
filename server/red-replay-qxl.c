@@ -19,7 +19,6 @@
 #include <config.h>
 #endif
 
-#include <stdbool.h>
 #include <inttypes.h>
 #include <zlib.h>
 #include <pthread.h>
@@ -1064,7 +1063,7 @@ static QXLCompatDrawable *red_replay_compat_drawable(SpiceReplay *replay, uint32
         red_replay_whiteness_ptr(replay, &qxl->u.whiteness, flags);
         break;
     default:
-        spice_error("%s: unknown type %d", __FUNCTION__, qxl->type);
+        spice_error("unknown type %d", qxl->type);
         break;
     };
     return qxl;
@@ -1256,6 +1255,7 @@ static void replay_handle_create_primary(QXLWorker *worker, SpiceReplay *replay)
     read_binary(replay, "data", &size, &mem, 0);
     surface.group_id = 0;
     free(replay->primary_mem);
+    replay->allocated = g_list_remove(replay->allocated, mem);
     replay->primary_mem = mem;
     surface.mem = QXLPHYSICAL_FROM_PTR(mem);
     worker->create_primary_surface(worker, 0, &surface);

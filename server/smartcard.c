@@ -124,7 +124,6 @@ typedef struct RedMsgItem {
 } RedMsgItem;
 
 static RedMsgItem *smartcard_get_vsc_msg_item(RedChannelClient *rcc, VSCMsgHeader *vheader);
-static void smartcard_channel_client_pipe_add_push(RedChannelClient *rcc, RedPipeItem *item);
 
 static struct Readers {
     uint32_t num;
@@ -186,6 +185,9 @@ static RedPipeItem *smartcard_read_msg_from_device(RedCharDevice *self,
     return NULL;
 }
 
+/* this is called from both device input and client input. since the device is
+ * a usb device, the context is still the main thread (kvm_main_loop, timers)
+ * so no mutex is required. */
 static void smartcard_send_msg_to_client(RedCharDevice *self,
                                          RedPipeItem *msg,
                                          RedClient *client)
@@ -196,7 +198,7 @@ static void smartcard_send_msg_to_client(RedCharDevice *self,
     spice_assert(dev->priv->scc &&
                  red_channel_client_get_client(rcc) == client);
     red_pipe_item_ref(msg);
-    smartcard_channel_client_pipe_add_push(rcc, msg);
+    red_channel_client_pipe_add_push(rcc, msg);
 }
 
 static void smartcard_send_tokens_to_client(RedCharDevice *self,
@@ -392,11 +394,6 @@ void smartcard_char_device_detach_client(RedCharDeviceSmartcard *smartcard,
     smartcard->priv->scc = NULL;
 }
 
-static int smartcard_channel_client_config_socket(RedChannelClient *rcc)
-{
-    return TRUE;
-}
-
 SmartCardChannelClient* smartcard_char_device_get_client(RedCharDeviceSmartcard *smartcard)
 {
     return smartcard->priv->scc;
@@ -458,15 +455,6 @@ static void smartcard_channel_send_item(RedChannelClient *rcc, RedPipeItem *item
         return;
     }
     red_channel_client_begin_send_message(rcc);
-}
-
-/* this is called from both device input and client input. since the device is
- * a usb device, the context is still the main thread (kvm_main_loop, timers)
- * so no mutex is required. */
-static void smartcard_channel_client_pipe_add_push(RedChannelClient *rcc,
-                                                   RedPipeItem *item)
-{
-    red_channel_client_pipe_add_push(rcc, item);
 }
 
 static void smartcard_free_vsc_msg_item(RedPipeItem *base)
@@ -540,20 +528,14 @@ int smartcard_char_device_handle_migrate_data(RedCharDeviceSmartcard *smartcard,
 
 static void smartcard_connect_client(RedChannel *channel, RedClient *client,
                                      RedsStream *stream, int migration,
-                                     int num_common_caps, uint32_t *common_caps,
-                                     int num_caps, uint32_t *caps)
+                                     RedChannelCapabilities *caps)
 {
     SpiceCharDeviceInstance *char_device =
             smartcard_readers_get_unattached();
 
     SmartCardChannelClient *scc;
 
-    scc = smartcard_channel_client_create(channel,
-                                          client,
-                                          stream,
-                                          FALSE,
-                                          num_common_caps, common_caps,
-                                          num_caps, caps);
+    scc = smartcard_channel_client_create(channel, client, stream, caps);
 
     if (!scc) {
         return;
@@ -592,11 +574,8 @@ red_smartcard_channel_class_init(RedSmartcardChannelClass *klass)
 
     channel_class->handle_message = smartcard_channel_client_handle_message,
 
-    channel_class->config_socket = smartcard_channel_client_config_socket;
     channel_class->on_disconnect = smartcard_channel_client_on_disconnect;
     channel_class->send_item = smartcard_channel_send_item;
-    channel_class->alloc_recv_buf = smartcard_channel_client_alloc_msg_rcv_buf;
-    channel_class->release_recv_buf = smartcard_channel_client_release_msg_rcv_buf;
     channel_class->handle_migrate_flush_mark = smartcard_channel_client_handle_migrate_flush_mark;
     channel_class->handle_migrate_data = smartcard_channel_client_handle_migrate_data;
 

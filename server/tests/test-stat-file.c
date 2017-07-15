@@ -19,18 +19,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <glib.h>
 #include <spice.h>
 
+#include "test-glib-compat.h"
 #include "stat-file.h"
-
-/* GLIB_CHECK_VERSION(2, 40, 0) */
-#ifndef g_assert_nonnull
-#define g_assert_nonnull g_assert
-#endif
-#ifndef g_assert_null
-#define g_assert_null(ptr) g_assert((ptr) == NULL)
-#endif
 
 static void stat_file(void)
 {
@@ -97,11 +89,30 @@ static void stat_file(void)
     stat_file_free(stat_file);
 }
 
+/* make sure first node is node 0 */
+static void stat_file_start(void)
+{
+    RedStatFile *stat_file;
+    StatNodeRef ref;
+
+    /* create */
+    stat_file = stat_file_new(10);
+    g_assert_nonnull(stat_file);
+
+    ref = stat_file_add_node(stat_file, INVALID_STAT_REF, "ZERO", TRUE);
+    g_assert_cmpuint(ref,==,0);
+
+    stat_file_unlink(stat_file);
+    stat_file_free(stat_file);
+}
+
+
 int main(int argc, char *argv[])
 {
     g_test_init(&argc, &argv, NULL);
 
     g_test_add_func("/server/stat-file", stat_file);
+    g_test_add_func("/server/stat-file-start", stat_file_start);
 
     return g_test_run();
 }

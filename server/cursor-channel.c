@@ -34,14 +34,12 @@ typedef struct CursorItem {
     RedCursorCmd *red_cursor;
 } CursorItem;
 
-G_STATIC_ASSERT(sizeof(CursorItem) <= QXL_CURSUR_DEVICE_DATA_SIZE);
-
 struct CursorChannel
 {
     CommonGraphicsChannel parent;
 
     CursorItem *item;
-    int cursor_visible;
+    bool cursor_visible;
     SpicePoint16 cursor_position;
     uint16_t cursor_trail_length;
     uint16_t cursor_trail_frequency;
@@ -294,7 +292,7 @@ static void cursor_channel_send_item(RedChannelClient *rcc, RedPipeItem *pipe_it
 CursorChannel* cursor_channel_new(RedsState *server, QXLInstance *qxl,
                                   const SpiceCoreInterfaceInternal *core)
 {
-    spice_info("create cursor channel");
+    spice_debug("create cursor channel");
     return g_object_new(TYPE_CURSOR_CHANNEL,
                         "spice-server", server,
                         "core-interface", core,
@@ -309,7 +307,7 @@ CursorChannel* cursor_channel_new(RedsState *server, QXLInstance *qxl,
 void cursor_channel_process_cmd(CursorChannel *cursor, RedCursorCmd *cursor_cmd)
 {
     CursorItem *cursor_item;
-    int cursor_show = FALSE;
+    bool cursor_show = false;
     QXLInstance *qxl;
 
     spice_return_if_fail(cursor);
@@ -320,16 +318,16 @@ void cursor_channel_process_cmd(CursorChannel *cursor, RedCursorCmd *cursor_cmd)
 
     switch (cursor_cmd->type) {
     case QXL_CURSOR_SET:
-        cursor->cursor_visible = cursor_cmd->u.set.visible;
+        cursor->cursor_visible = !!cursor_cmd->u.set.visible;
         cursor_channel_set_item(cursor, cursor_item);
         break;
     case QXL_CURSOR_MOVE:
         cursor_show = !cursor->cursor_visible;
-        cursor->cursor_visible = TRUE;
+        cursor->cursor_visible = true;
         cursor->cursor_position = cursor_cmd->u.position;
         break;
     case QXL_CURSOR_HIDE:
-        cursor->cursor_visible = FALSE;
+        cursor->cursor_visible = false;
         break;
     case QXL_CURSOR_TRAIL:
         cursor->cursor_trail_length = cursor_cmd->u.trail.length;
@@ -358,7 +356,7 @@ void cursor_channel_reset(CursorChannel *cursor)
     spice_return_if_fail(cursor);
 
     cursor_channel_set_item(cursor, NULL);
-    cursor->cursor_visible = TRUE;
+    cursor->cursor_visible = true;
     cursor->cursor_position.x = cursor->cursor_position.y = 0;
     cursor->cursor_trail_length = cursor->cursor_trail_frequency = 0;
 
@@ -406,18 +404,16 @@ void cursor_channel_set_mouse_mode(CursorChannel *cursor, uint32_t mode)
 
 void cursor_channel_connect(CursorChannel *cursor, RedClient *client, RedsStream *stream,
                             int migrate,
-                            uint32_t *common_caps, int num_common_caps,
-                            uint32_t *caps, int num_caps)
+                            RedChannelCapabilities *caps)
 {
     CursorChannelClient *ccc;
 
     spice_return_if_fail(cursor != NULL);
 
-    spice_info("add cursor channel client");
+    spice_debug("add cursor channel client");
     ccc = cursor_channel_client_new(cursor, client, stream,
                                     migrate,
-                                    common_caps, num_common_caps,
-                                    caps, num_caps);
+                                    caps);
     spice_return_if_fail(ccc != NULL);
 
     RedChannelClient *rcc = RED_CHANNEL_CLIENT(ccc);
@@ -448,7 +444,7 @@ cursor_channel_class_init(CursorChannelClass *klass)
     object_class->finalize = cursor_channel_finalize;
 
     channel_class->parser = spice_get_client_channel_parser(SPICE_CHANNEL_CURSOR, NULL);
-    channel_class->handle_parsed = red_channel_client_handle_message;
+    channel_class->handle_message = red_channel_client_handle_message;
 
     channel_class->on_disconnect =  cursor_channel_client_on_disconnect;
     channel_class->send_item = cursor_channel_send_item;
@@ -457,6 +453,6 @@ cursor_channel_class_init(CursorChannelClass *klass)
 static void
 cursor_channel_init(CursorChannel *self)
 {
-    self->cursor_visible = TRUE;
+    self->cursor_visible = true;
     self->mouse_mode = SPICE_MOUSE_MODE_SERVER;
 }

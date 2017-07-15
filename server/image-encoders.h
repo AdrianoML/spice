@@ -15,6 +15,7 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef IMAGE_ENCODERS_H_
 #define IMAGE_ENCODERS_H_
 
@@ -196,22 +197,22 @@ typedef struct compress_send_data_t {
     gboolean is_lossy;
 } compress_send_data_t;
 
-int image_encoders_compress_quic(ImageEncoders *enc, SpiceImage *dest,
-                                 SpiceBitmap *src, compress_send_data_t* o_comp_data);
-int image_encoders_compress_lz(ImageEncoders *enc, SpiceImage *dest,
-                               SpiceBitmap *src, compress_send_data_t* o_comp_data);
-int image_encoders_compress_jpeg(ImageEncoders *enc, SpiceImage *dest,
-                                 SpiceBitmap *src, compress_send_data_t* o_comp_data);
-#ifdef USE_LZ4
-int image_encoders_compress_lz4(ImageEncoders *enc, SpiceImage *dest,
+bool image_encoders_compress_quic(ImageEncoders *enc, SpiceImage *dest,
+                                  SpiceBitmap *src, compress_send_data_t* o_comp_data);
+bool image_encoders_compress_lz(ImageEncoders *enc, SpiceImage *dest,
                                 SpiceBitmap *src, compress_send_data_t* o_comp_data);
+bool image_encoders_compress_jpeg(ImageEncoders *enc, SpiceImage *dest,
+                                  SpiceBitmap *src, compress_send_data_t* o_comp_data);
+#ifdef USE_LZ4
+bool image_encoders_compress_lz4(ImageEncoders *enc, SpiceImage *dest,
+                                 SpiceBitmap *src, compress_send_data_t* o_comp_data);
 #endif
-int image_encoders_compress_glz(ImageEncoders *enc, SpiceImage *dest,
-                                SpiceBitmap *src,
-                                RedDrawable *red_drawable,
-                                GlzImageRetention *glz_retention,
-                                compress_send_data_t* o_comp_data,
-                                gboolean enable_zlib_glz_wrap);
+bool image_encoders_compress_glz(ImageEncoders *enc, SpiceImage *dest,
+                                 SpiceBitmap *src,
+                                 RedDrawable *red_drawable,
+                                 GlzImageRetention *glz_retention,
+                                 compress_send_data_t* o_comp_data,
+                                 gboolean enable_zlib_glz_wrap);
 
 #define RED_RELEASE_BUNCH_SIZE 64
 

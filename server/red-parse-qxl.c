@@ -19,7 +19,6 @@
 #include <config.h>
 #endif
 
-#include <stdbool.h>
 #include <inttypes.h>
 #include <glib.h>
 #include <common/lz_common.h>
@@ -430,13 +429,13 @@ static const char *bitmap_format_to_string(int format)
 static const unsigned int MAP_BITMAP_FMT_TO_BITS_PER_PIXEL[] =
     {0, 1, 1, 4, 4, 8, 16, 24, 32, 32, 8};
 
-static int bitmap_consistent(SpiceBitmap *bitmap)
+static bool bitmap_consistent(SpiceBitmap *bitmap)
 {
     unsigned int bpp;
 
     if (bitmap->format >= SPICE_N_ELEMENTS(MAP_BITMAP_FMT_TO_BITS_PER_PIXEL)) {
         spice_warning("wrong format specified for image\n");
-        return FALSE;
+        return false;
     }
 
     bpp = MAP_BITMAP_FMT_TO_BITS_PER_PIXEL[bitmap->format];
@@ -446,13 +445,13 @@ static int bitmap_consistent(SpiceBitmap *bitmap)
                     bitmap->stride, bitmap->x, bpp,
                     bitmap_format_to_string(bitmap->format),
                     bitmap->format);
-        return FALSE;
+        return false;
     }
-    return TRUE;
+    return true;
 }
 
 static SpiceImage *red_get_image(RedMemSlotInfo *slots, int group_id,
-                                 QXLPHYSICAL addr, uint32_t flags, int is_mask)
+                                 QXLPHYSICAL addr, uint32_t flags, bool is_mask)
 {
     RedDataChunk chunks;
     QXLImage *qxl;
@@ -616,7 +615,7 @@ static void red_get_brush_ptr(RedMemSlotInfo *slots, int group_id,
         }
         break;
     case SPICE_BRUSH_TYPE_PATTERN:
-        red->u.pattern.pat = red_get_image(slots, group_id, qxl->u.pattern.pat, flags, FALSE);
+        red->u.pattern.pat = red_get_image(slots, group_id, qxl->u.pattern.pat, flags, false);
         break;
     }
 }
@@ -635,7 +634,7 @@ static void red_get_qmask_ptr(RedMemSlotInfo *slots, int group_id,
 {
     red->flags  = qxl->flags;
     red_get_point_ptr(&red->pos, &qxl->pos);
-    red->bitmap = red_get_image(slots, group_id, qxl->bitmap, flags, TRUE);
+    red->bitmap = red_get_image(slots, group_id, qxl->bitmap, flags, true);
 }
 
 static void red_put_qmask(SpiceQMask *red)
@@ -660,7 +659,7 @@ static void red_put_fill(SpiceFill *red)
 static void red_get_opaque_ptr(RedMemSlotInfo *slots, int group_id,
                                SpiceOpaque *red, QXLOpaque *qxl, uint32_t flags)
 {
-   red->src_bitmap     = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+   red->src_bitmap     = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
    red_get_rect_ptr(&red->src_area, &qxl->src_area);
    red_get_brush_ptr(slots, group_id, &red->brush, &qxl->brush, flags);
    red->rop_descriptor = qxl->rop_descriptor;
@@ -675,12 +674,12 @@ static void red_put_opaque(SpiceOpaque *red)
     red_put_qmask(&red->mask);
 }
 
-static int red_get_copy_ptr(RedMemSlotInfo *slots, int group_id,
-                            SpiceCopy *red, QXLCopy *qxl, uint32_t flags)
+static bool red_get_copy_ptr(RedMemSlotInfo *slots, int group_id,
+                             SpiceCopy *red, QXLCopy *qxl, uint32_t flags)
 {
-    red->src_bitmap      = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+    red->src_bitmap      = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
     if (!red->src_bitmap) {
-        return 1;
+        return false;
     }
     red_get_rect_ptr(&red->src_area, &qxl->src_area);
     /* The source area should not extend outside the source bitmap or have
@@ -690,17 +689,17 @@ static int red_get_copy_ptr(RedMemSlotInfo *slots, int group_id,
         red->src_area.left > red->src_area.right ||
         red->src_area.top < 0 ||
         red->src_area.top > red->src_area.bottom) {
-        return 1;
+        return false;
     }
     if (red->src_bitmap->descriptor.type == SPICE_IMAGE_TYPE_BITMAP &&
         (red->src_area.right > red->src_bitmap->u.bitmap.x ||
          red->src_area.bottom > red->src_bitmap->u.bitmap.y)) {
-        return 1;
+        return false;
     }
     red->rop_descriptor  = qxl->rop_descriptor;
     red->scale_mode      = qxl->scale_mode;
     red_get_qmask_ptr(slots, group_id, &red->mask, &qxl->mask, flags);
-    return 0;
+    return true;
 }
 
 static void red_put_copy(SpiceCopy *red)
@@ -722,7 +721,7 @@ static void red_get_transparent_ptr(RedMemSlotInfo *slots, int group_id,
                                     SpiceTransparent *red, QXLTransparent *qxl,
                                     uint32_t flags)
 {
-    red->src_bitmap      = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+    red->src_bitmap      = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
    red_get_rect_ptr(&red->src_area, &qxl->src_area);
    red->src_color       = qxl->src_color;
    red->true_color      = qxl->true_color;
@@ -739,7 +738,7 @@ static void red_get_alpha_blend_ptr(RedMemSlotInfo *slots, int group_id,
 {
     red->alpha_flags = qxl->alpha_flags;
     red->alpha       = qxl->alpha;
-    red->src_bitmap  = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+    red->src_bitmap  = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
     red_get_rect_ptr(&red->src_area, &qxl->src_area);
 }
 
@@ -748,7 +747,7 @@ static void red_get_alpha_blend_ptr_compat(RedMemSlotInfo *slots, int group_id,
                                            uint32_t flags)
 {
     red->alpha       = qxl->alpha;
-    red->src_bitmap  = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+    red->src_bitmap  = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
     red_get_rect_ptr(&red->src_area, &qxl->src_area);
 }
 
@@ -766,15 +765,15 @@ static bool get_transform(RedMemSlotInfo *slots,
     int error;
 
     if (qxl_transform == 0)
-        return FALSE;
+        return false;
 
     t = (uint32_t *)memslot_get_virt(slots, qxl_transform, sizeof(*dst_transform), group_id, &error);
 
     if (!t || error)
-        return FALSE;
+        return false;
 
     memcpy(dst_transform, t, sizeof(*dst_transform));
-    return TRUE;
+    return true;
 }
 
 static void red_get_composite_ptr(RedMemSlotInfo *slots, int group_id,
@@ -782,12 +781,12 @@ static void red_get_composite_ptr(RedMemSlotInfo *slots, int group_id,
 {
     red->flags = qxl->flags;
 
-    red->src_bitmap = red_get_image(slots, group_id, qxl->src, flags, FALSE);
+    red->src_bitmap = red_get_image(slots, group_id, qxl->src, flags, false);
     if (get_transform(slots, group_id, qxl->src_transform, &red->src_transform))
         red->flags |= SPICE_COMPOSITE_HAS_SRC_TRANSFORM;
 
     if (qxl->mask) {
-        red->mask_bitmap = red_get_image(slots, group_id, qxl->mask, flags, FALSE);
+        red->mask_bitmap = red_get_image(slots, group_id, qxl->mask, flags, false);
         red->flags |= SPICE_COMPOSITE_HAS_MASK;
         if (get_transform(slots, group_id, qxl->mask_transform, &red->mask_transform))
             red->flags |= SPICE_COMPOSITE_HAS_MASK_TRANSFORM;
@@ -810,7 +809,7 @@ static void red_put_composite(SpiceComposite *red)
 static void red_get_rop3_ptr(RedMemSlotInfo *slots, int group_id,
                              SpiceRop3 *red, QXLRop3 *qxl, uint32_t flags)
 {
-   red->src_bitmap = red_get_image(slots, group_id, qxl->src_bitmap, flags, FALSE);
+   red->src_bitmap = red_get_image(slots, group_id, qxl->src_bitmap, flags, false);
    red_get_rect_ptr(&red->src_area, &qxl->src_area);
    red_get_brush_ptr(slots, group_id, &red->brush, &qxl->brush, flags);
    red->rop3       = qxl->rop3;
@@ -825,14 +824,14 @@ static void red_put_rop3(SpiceRop3 *red)
     red_put_qmask(&red->mask);
 }
 
-static int red_get_stroke_ptr(RedMemSlotInfo *slots, int group_id,
-                              SpiceStroke *red, QXLStroke *qxl, uint32_t flags)
+static bool red_get_stroke_ptr(RedMemSlotInfo *slots, int group_id,
+                               SpiceStroke *red, QXLStroke *qxl, uint32_t flags)
 {
     int error;
 
     red->path = red_get_path(slots, group_id, qxl->path);
     if (!red->path) {
-        return 1;
+        return false;
     }
     red->attr.flags       = qxl->attr.flags;
     if (red->attr.flags & SPICE_LINE_FLAGS_STYLED) {
@@ -846,7 +845,7 @@ static int red_get_stroke_ptr(RedMemSlotInfo *slots, int group_id,
         buf = (uint8_t *)memslot_get_virt(slots, qxl->attr.style,
                                           style_nseg * sizeof(QXLFIXED), group_id, &error);
         if (error) {
-            return error;
+            return false;
         }
         memcpy(red->attr.style, buf, style_nseg * sizeof(QXLFIXED));
     } else {
@@ -856,7 +855,7 @@ static int red_get_stroke_ptr(RedMemSlotInfo *slots, int group_id,
     red_get_brush_ptr(slots, group_id, &red->brush, &qxl->brush, flags);
     red->fore_mode        = qxl->fore_mode;
     red->back_mode        = qxl->back_mode;
-    return 0;
+    return true;
 }
 
 static void red_put_stroke(SpiceStroke *red)
@@ -1032,8 +1031,8 @@ static void red_put_clip(SpiceClip *red)
     }
 }
 
-static int red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
-                                   RedDrawable *red, QXLPHYSICAL addr, uint32_t flags)
+static bool red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
+                                    RedDrawable *red, QXLPHYSICAL addr, uint32_t flags)
 {
     QXLDrawable *qxl;
     int i;
@@ -1041,7 +1040,7 @@ static int red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
 
     qxl = (QXLDrawable *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return error;
+        return false;
     }
     red->release_info_ext.info     = &qxl->release_info;
     red->release_info_ext.group_id = group_id;
@@ -1070,11 +1069,9 @@ static int red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
                               &red->u.blackness, &qxl->u.blackness, flags);
         break;
     case QXL_DRAW_BLEND:
-        error = red_get_blend_ptr(slots, group_id, &red->u.blend, &qxl->u.blend, flags);
-        break;
+        return red_get_blend_ptr(slots, group_id, &red->u.blend, &qxl->u.blend, flags);
     case QXL_DRAW_COPY:
-        error = red_get_copy_ptr(slots, group_id, &red->u.copy, &qxl->u.copy, flags);
-        break;
+        return red_get_copy_ptr(slots, group_id, &red->u.copy, &qxl->u.copy, flags);
     case QXL_COPY_BITS:
         red_get_point_ptr(&red->u.copy_bits.src_pos, &qxl->u.copy_bits.src_pos);
         break;
@@ -1096,8 +1093,7 @@ static int red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
         red_get_composite_ptr(slots, group_id, &red->u.composite, &qxl->u.composite, flags);
         break;
     case QXL_DRAW_STROKE:
-        error = red_get_stroke_ptr(slots, group_id, &red->u.stroke, &qxl->u.stroke, flags);
-        break;
+        return red_get_stroke_ptr(slots, group_id, &red->u.stroke, &qxl->u.stroke, flags);
     case QXL_DRAW_TEXT:
         red_get_text_ptr(slots, group_id, &red->u.text, &qxl->u.text, flags);
         break;
@@ -1111,21 +1107,20 @@ static int red_get_native_drawable(RedMemSlotInfo *slots, int group_id,
         break;
     default:
         spice_warning("unknown type %d", red->type);
-        error = 1;
-        break;
+        return false;
     };
-    return error;
+    return true;
 }
 
-static int red_get_compat_drawable(RedMemSlotInfo *slots, int group_id,
-                                   RedDrawable *red, QXLPHYSICAL addr, uint32_t flags)
+static bool red_get_compat_drawable(RedMemSlotInfo *slots, int group_id,
+                                    RedDrawable *red, QXLPHYSICAL addr, uint32_t flags)
 {
     QXLCompatDrawable *qxl;
     int error;
 
     qxl = (QXLCompatDrawable *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return error;
+        return false;
     }
     red->release_info_ext.info     = &qxl->release_info;
     red->release_info_ext.group_id = group_id;
@@ -1153,11 +1148,9 @@ static int red_get_compat_drawable(RedMemSlotInfo *slots, int group_id,
                               &red->u.blackness, &qxl->u.blackness, flags);
         break;
     case QXL_DRAW_BLEND:
-        error = red_get_blend_ptr(slots, group_id, &red->u.blend, &qxl->u.blend, flags);
-        break;
+        return red_get_blend_ptr(slots, group_id, &red->u.blend, &qxl->u.blend, flags);
     case QXL_DRAW_COPY:
-        error = red_get_copy_ptr(slots, group_id, &red->u.copy, &qxl->u.copy, flags);
-        break;
+        return red_get_copy_ptr(slots, group_id, &red->u.copy, &qxl->u.copy, flags);
     case QXL_COPY_BITS:
         red_get_point_ptr(&red->u.copy_bits.src_pos, &qxl->u.copy_bits.src_pos);
         red->surface_deps[0] = 0;
@@ -1183,8 +1176,7 @@ static int red_get_compat_drawable(RedMemSlotInfo *slots, int group_id,
         red_get_rop3_ptr(slots, group_id, &red->u.rop3, &qxl->u.rop3, flags);
         break;
     case QXL_DRAW_STROKE:
-        error = red_get_stroke_ptr(slots, group_id, &red->u.stroke, &qxl->u.stroke, flags);
-        break;
+        return red_get_stroke_ptr(slots, group_id, &red->u.stroke, &qxl->u.stroke, flags);
     case QXL_DRAW_TEXT:
         red_get_text_ptr(slots, group_id, &red->u.text, &qxl->u.text, flags);
         break;
@@ -1198,16 +1190,15 @@ static int red_get_compat_drawable(RedMemSlotInfo *slots, int group_id,
         break;
     default:
         spice_warning("unknown type %d", red->type);
-        error = 1;
-        break;
+        return false;
     };
-    return error;
+    return true;
 }
 
-int red_get_drawable(RedMemSlotInfo *slots, int group_id,
+bool red_get_drawable(RedMemSlotInfo *slots, int group_id,
                       RedDrawable *red, QXLPHYSICAL addr, uint32_t flags)
 {
-    int ret;
+    bool ret;
 
     if (flags & QXL_COMMAND_FLAG_COMPAT) {
         ret = red_get_compat_drawable(slots, group_id, red, addr, flags);
@@ -1266,15 +1257,15 @@ void red_put_drawable(RedDrawable *red)
     }
 }
 
-int red_get_update_cmd(RedMemSlotInfo *slots, int group_id,
-                       RedUpdateCmd *red, QXLPHYSICAL addr)
+bool red_get_update_cmd(RedMemSlotInfo *slots, int group_id,
+                        RedUpdateCmd *red, QXLPHYSICAL addr)
 {
     QXLUpdateCmd *qxl;
     int error;
 
     qxl = (QXLUpdateCmd *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return 1;
+        return false;
     }
     red->release_info_ext.info     = &qxl->release_info;
     red->release_info_ext.group_id = group_id;
@@ -1283,7 +1274,7 @@ int red_get_update_cmd(RedMemSlotInfo *slots, int group_id,
     red_get_rect_ptr(&red->area, &qxl->area);
     red->update_id  = qxl->update_id;
     red->surface_id = qxl->surface_id;
-    return 0;
+    return true;
 }
 
 void red_put_update_cmd(RedUpdateCmd *red)
@@ -1291,8 +1282,8 @@ void red_put_update_cmd(RedUpdateCmd *red)
     /* nothing yet */
 }
 
-int red_get_message(RedMemSlotInfo *slots, int group_id,
-                    RedMessage *red, QXLPHYSICAL addr)
+bool red_get_message(RedMemSlotInfo *slots, int group_id,
+                     RedMessage *red, QXLPHYSICAL addr)
 {
     QXLMessage *qxl;
     int error;
@@ -1308,7 +1299,7 @@ int red_get_message(RedMemSlotInfo *slots, int group_id,
      */
     qxl = (QXLMessage *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return 1;
+        return false;
     }
     red->release_info_ext.info      = &qxl->release_info;
     red->release_info_ext.group_id  = group_id;
@@ -1318,10 +1309,10 @@ int red_get_message(RedMemSlotInfo *slots, int group_id,
     len = MIN(len, 100000);
     end = (uint8_t *)memchr(qxl->data, 0, len);
     if (end == NULL) {
-        return 1;
+        return false;
     }
     red->len = end - qxl->data;
-    return 0;
+    return true;
 }
 
 void red_put_message(RedMessage *red)
@@ -1375,8 +1366,8 @@ bool red_validate_surface(uint32_t width, uint32_t height,
     return true;
 }
 
-int red_get_surface_cmd(RedMemSlotInfo *slots, int group_id,
-                        RedSurfaceCmd *red, QXLPHYSICAL addr)
+bool red_get_surface_cmd(RedMemSlotInfo *slots, int group_id,
+                         RedSurfaceCmd *red, QXLPHYSICAL addr)
 {
     QXLSurfaceCmd *qxl;
     uint64_t size;
@@ -1385,7 +1376,7 @@ int red_get_surface_cmd(RedMemSlotInfo *slots, int group_id,
     qxl = (QXLSurfaceCmd *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id,
                                             &error);
     if (error) {
-        return 1;
+        return false;
     }
     red->release_info_ext.info      = &qxl->release_info;
     red->release_info_ext.group_id  = group_id;
@@ -1403,18 +1394,18 @@ int red_get_surface_cmd(RedMemSlotInfo *slots, int group_id,
 
         if (!red_validate_surface(red->u.surface_create.width, red->u.surface_create.height,
                                   red->u.surface_create.stride, red->u.surface_create.format)) {
-            return 1;
+            return false;
         }
 
         size = red->u.surface_create.height * abs(red->u.surface_create.stride);
         red->u.surface_create.data =
             (uint8_t*)memslot_get_virt(slots, qxl->u.surface_create.data, size, group_id, &error);
         if (error) {
-            return 1;
+            return false;
         }
         break;
     }
-    return 0;
+    return true;
 }
 
 void red_put_surface_cmd(RedSurfaceCmd *red)
@@ -1422,8 +1413,8 @@ void red_put_surface_cmd(RedSurfaceCmd *red)
     /* nothing yet */
 }
 
-static int red_get_cursor(RedMemSlotInfo *slots, int group_id,
-                          SpiceCursor *red, QXLPHYSICAL addr)
+static bool red_get_cursor(RedMemSlotInfo *slots, int group_id,
+                           SpiceCursor *red, QXLPHYSICAL addr)
 {
     QXLCursor *qxl;
     RedDataChunk chunks;
@@ -1434,7 +1425,7 @@ static int red_get_cursor(RedMemSlotInfo *slots, int group_id,
 
     qxl = (QXLCursor *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return 1;
+        return false;
     }
 
     red->header.unique     = qxl->header.unique;
@@ -1450,7 +1441,7 @@ static int red_get_cursor(RedMemSlotInfo *slots, int group_id,
                                    memslot_get_id(slots, addr),
                                    &chunks, &qxl->chunk);
     if (size == INVALID_SIZE) {
-        return 1;
+        return false;
     }
     red->data_size = MIN(red->data_size, size);
     data = red_linearize_chunk(&chunks, size, &free_data);
@@ -1461,7 +1452,7 @@ static int red_get_cursor(RedMemSlotInfo *slots, int group_id,
         red->data = spice_malloc(size);
         memcpy(red->data, data, size);
     }
-    return 0;
+    return true;
 }
 
 static void red_put_cursor(SpiceCursor *red)
@@ -1469,15 +1460,15 @@ static void red_put_cursor(SpiceCursor *red)
     free(red->data);
 }
 
-int red_get_cursor_cmd(RedMemSlotInfo *slots, int group_id,
-                       RedCursorCmd *red, QXLPHYSICAL addr)
+bool red_get_cursor_cmd(RedMemSlotInfo *slots, int group_id,
+                        RedCursorCmd *red, QXLPHYSICAL addr)
 {
     QXLCursorCmd *qxl;
     int error;
 
     qxl = (QXLCursorCmd *)memslot_get_virt(slots, addr, sizeof(*qxl), group_id, &error);
     if (error) {
-        return error;
+        return false;
     }
     red->release_info_ext.info      = &qxl->release_info;
     red->release_info_ext.group_id  = group_id;
@@ -1487,8 +1478,7 @@ int red_get_cursor_cmd(RedMemSlotInfo *slots, int group_id,
     case QXL_CURSOR_SET:
         red_get_point16_ptr(&red->u.set.position, &qxl->u.set.position);
         red->u.set.visible  = qxl->u.set.visible;
-        error = red_get_cursor(slots, group_id,  &red->u.set.shape, qxl->u.set.shape);
-        break;
+        return red_get_cursor(slots, group_id,  &red->u.set.shape, qxl->u.set.shape);
     case QXL_CURSOR_MOVE:
         red_get_point16_ptr(&red->u.position, &qxl->u.position);
         break;
@@ -1497,7 +1487,7 @@ int red_get_cursor_cmd(RedMemSlotInfo *slots, int group_id,
         red->u.trail.frequency = qxl->u.trail.frequency;
         break;
     }
-    return error;
+    return true;
 }
 
 void red_put_cursor_cmd(RedCursorCmd *red)

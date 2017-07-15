@@ -28,15 +28,10 @@
 #include "main-channel.h"
 #include "main-channel-client.h"
 
-// approximate max receive message size for main channel
-#define MAIN_CHANNEL_RECEIVE_BUF_SIZE \
-    (4096 + (REDS_AGENT_WINDOW_SIZE + REDS_NUM_INTERNAL_AGENT_MESSAGES) * SPICE_AGENT_MAX_DATA_SIZE)
-
 struct MainChannel
 {
     RedChannel parent;
 
-    uint8_t recv_buf[MAIN_CHANNEL_RECEIVE_BUF_SIZE];
     // TODO: add refs and release (afrer all clients completed migration in one way or the other?)
     RedsMigSpice mig_target;
     int num_clients_mig_wait;
@@ -87,7 +82,7 @@ static void main_channel_push_channels(MainChannelClient *mcc)
                    "during migration");
         return;
     }
-    red_channel_client_pipe_add_type(RED_CHANNEL_CLIENT(mcc), RED_PIPE_ITEM_TYPE_MAIN_CHANNELS_LIST);
+    red_channel_client_pipe_add_type(rcc, RED_PIPE_ITEM_TYPE_MAIN_CHANNELS_LIST);
 }
 
 void main_channel_push_mouse_mode(MainChannel *main_chan, int current_mode,
@@ -104,12 +99,16 @@ void main_channel_push_mouse_mode(MainChannel *main_chan, int current_mode,
 
 void main_channel_push_agent_connected(MainChannel *main_chan)
 {
-    if (red_channel_test_remote_cap(RED_CHANNEL(main_chan),
-                                    SPICE_MAIN_CAP_AGENT_CONNECTED_TOKENS)) {
-        red_channel_pipes_add_type(RED_CHANNEL(main_chan),
-                                   RED_PIPE_ITEM_TYPE_MAIN_AGENT_CONNECTED_TOKENS);
-    } else {
-        red_channel_pipes_add_empty_msg(RED_CHANNEL(main_chan), SPICE_MSG_MAIN_AGENT_CONNECTED);
+    GListIter iter;
+    RedChannelClient *rcc;
+    FOREACH_CLIENT(RED_CHANNEL(main_chan), iter, rcc) {
+        if (red_channel_client_test_remote_cap(rcc,
+                                               SPICE_MAIN_CAP_AGENT_CONNECTED_TOKENS)) {
+            red_channel_client_pipe_add_type(rcc,
+                                             RED_PIPE_ITEM_TYPE_MAIN_AGENT_CONNECTED_TOKENS);
+        } else {
+            red_channel_client_pipe_add_empty_msg(rcc, SPICE_MSG_MAIN_AGENT_CONNECTED);
+        }
     }
 }
 
@@ -123,8 +122,8 @@ static void main_channel_push_migrate_data_item(MainChannel *main_chan)
     red_channel_pipes_add_type(RED_CHANNEL(main_chan), RED_PIPE_ITEM_TYPE_MAIN_MIGRATE_DATA);
 }
 
-static int main_channel_handle_migrate_data(RedChannelClient *rcc,
-    uint32_t size, void *message)
+static bool main_channel_handle_migrate_data(RedChannelClient *rcc,
+                                             uint32_t size, void *message)
 {
     RedChannel *channel = red_channel_client_get_channel(rcc);
     MainChannelClient *mcc = MAIN_CHANNEL_CLIENT(rcc);
@@ -179,8 +178,8 @@ void main_channel_migrate_switch(MainChannel *main_chan, RedsMigSpice *mig_targe
     red_channel_pipes_add_type(RED_CHANNEL(main_chan), RED_PIPE_ITEM_TYPE_MAIN_MIGRATE_SWITCH_HOST);
 }
 
-static int main_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, uint16_t type,
-                                      void *message)
+static bool main_channel_handle_message(RedChannelClient *rcc, uint16_t type,
+                                        uint32_t size, void *message)
 {
     RedChannel *channel = red_channel_client_get_channel(rcc);
     MainChannel *main_chan = MAIN_CHANNEL(channel);
@@ -243,54 +242,22 @@ static int main_channel_handle_parsed(RedChannelClient *rcc, uint32_t size, uint
         main_channel_client_handle_migrate_end(mcc);
         break;
     default:
-        return red_channel_client_handle_message(rcc, size, type, message);
+        return red_channel_client_handle_message(rcc, type, size, message);
     }
     return TRUE;
 }
 
-static uint8_t *main_channel_alloc_msg_rcv_buf(RedChannelClient *rcc,
-                                               uint16_t type,
-                                               uint32_t size)
+static bool main_channel_handle_migrate_flush_mark(RedChannelClient *rcc)
 {
     RedChannel *channel = red_channel_client_get_channel(rcc);
-    MainChannel *main_chan = MAIN_CHANNEL(channel);
-    MainChannelClient *mcc = MAIN_CHANNEL_CLIENT(rcc);
-
-    if (type == SPICE_MSGC_MAIN_AGENT_DATA) {
-        return reds_get_agent_data_buffer(red_channel_get_server(channel), mcc, size);
-    } else {
-        return main_chan->recv_buf;
-    }
-}
-
-static void main_channel_release_msg_rcv_buf(RedChannelClient *rcc,
-                                               uint16_t type,
-                                               uint32_t size,
-                                               uint8_t *msg)
-{
-    RedChannel *channel = red_channel_client_get_channel(rcc);
-    if (type == SPICE_MSGC_MAIN_AGENT_DATA) {
-        reds_release_agent_data_buffer(red_channel_get_server(channel), msg);
-    }
-}
-
-static int main_channel_config_socket(RedChannelClient *rcc)
-{
-    return TRUE;
-}
-
-static int main_channel_handle_migrate_flush_mark(RedChannelClient *rcc)
-{
-    RedChannel *channel = red_channel_client_get_channel(rcc);
-    spice_debug(NULL);
+    spice_debug("trace");
     main_channel_push_migrate_data_item(MAIN_CHANNEL(channel));
     return TRUE;
 }
 
 MainChannelClient *main_channel_link(MainChannel *channel, RedClient *client,
                                      RedsStream *stream, uint32_t connection_id, int migration,
-                                     int num_common_caps, uint32_t *common_caps, int num_caps,
-                                     uint32_t *caps)
+                                     RedChannelCapabilities *caps)
 {
     MainChannelClient *mcc;
 
@@ -300,9 +267,7 @@ MainChannelClient *main_channel_link(MainChannel *channel, RedClient *client,
     // into usage somewhere (not an issue until we return migration to it's
     // former glory)
     spice_printerr("add main channel client");
-    mcc = main_channel_client_create(channel, client, stream, connection_id,
-                                     num_common_caps, common_caps,
-                                     num_caps, caps);
+    mcc = main_channel_client_create(channel, client, stream, connection_id, caps);
     return mcc;
 }
 
@@ -349,14 +314,11 @@ main_channel_class_init(MainChannelClass *klass)
     object_class->constructed = main_channel_constructed;
 
     channel_class->parser = spice_get_client_channel_parser(SPICE_CHANNEL_MAIN, NULL);
-    channel_class->handle_parsed = main_channel_handle_parsed;
+    channel_class->handle_message = main_channel_handle_message;
 
     /* channel callbacks */
-    channel_class->config_socket = main_channel_config_socket;
     channel_class->on_disconnect = main_channel_client_on_disconnect;
     channel_class->send_item = main_channel_client_send_item;
-    channel_class->alloc_recv_buf = main_channel_alloc_msg_rcv_buf;
-    channel_class->release_recv_buf = main_channel_release_msg_rcv_buf;
     channel_class->handle_migrate_flush_mark = main_channel_handle_migrate_flush_mark;
     channel_class->handle_migrate_data = main_channel_handle_migrate_data;
 }

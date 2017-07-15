@@ -30,39 +30,39 @@
 #define NET_TEST_WARMUP_BYTES 0
 #define NET_TEST_BYTES (1024 * 250)
 
-enum NetTestStage {
+typedef enum {
     NET_TEST_STAGE_INVALID,
     NET_TEST_STAGE_WARMUP,
     NET_TEST_STAGE_LATENCY,
     NET_TEST_STAGE_RATE,
     NET_TEST_STAGE_COMPLETE,
-};
+} NetTestStage;
 
 #define CLIENT_CONNECTIVITY_TIMEOUT (MSEC_PER_SEC * 30)
-#define PING_INTERVAL (MSEC_PER_SEC * 10)
 
 G_DEFINE_TYPE(MainChannelClient, main_channel_client, RED_TYPE_CHANNEL_CLIENT)
 
 #define MAIN_CHANNEL_CLIENT_PRIVATE(o) \
     (G_TYPE_INSTANCE_GET_PRIVATE((o), TYPE_MAIN_CHANNEL_CLIENT, MainChannelClientPrivate))
 
+// approximate max receive message size for main channel
+#define MAIN_CHANNEL_RECEIVE_BUF_SIZE \
+    (4096 + (REDS_AGENT_WINDOW_SIZE + REDS_NUM_INTERNAL_AGENT_MESSAGES) * SPICE_AGENT_MAX_DATA_SIZE)
+
 struct MainChannelClientPrivate {
     uint32_t connection_id;
     uint32_t ping_id;
     uint32_t net_test_id;
-    int net_test_stage;
+    NetTestStage net_test_stage;
     uint64_t latency;
     uint64_t bitrate_per_sec;
-#ifdef RED_STATISTICS
-    SpiceTimer *ping_timer;
-    int ping_interval;
-#endif
     int mig_wait_connect;
     int mig_connect_ok;
     int mig_wait_prev_complete;
     int mig_wait_prev_try_seamless;
     int init_sent;
     int seamless_mig_dst;
+    uint8_t recv_buf[MAIN_CHANNEL_RECEIVE_BUF_SIZE];
 };
 
 typedef struct RedPingPipeItem {
@@ -162,48 +162,45 @@ static void main_channel_client_set_property(GObject *object,
     }
 }
 
-#ifdef RED_STATISTICS
-static void ping_timer_cb(void *opaque);
-#endif
-
-static void main_channel_client_constructed(GObject *object)
+static uint8_t *
+main_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
+                                      uint16_t type, uint32_t size)
 {
-    G_OBJECT_CLASS(main_channel_client_parent_class)->constructed(object);
-#ifdef RED_STATISTICS
-    MainChannelClient *self = MAIN_CHANNEL_CLIENT(object);
-    RedsState *reds =
-        red_channel_get_server(red_channel_client_get_channel(RED_CHANNEL_CLIENT(object)));
+    MainChannelClient *mcc = MAIN_CHANNEL_CLIENT(rcc);
 
-    self->priv->ping_timer = reds_core_timer_add(reds, ping_timer_cb, self);
-    if (!self->priv->ping_timer) {
-        spice_error("ping timer create failed");
+    if (type == SPICE_MSGC_MAIN_AGENT_DATA) {
+        RedChannel *channel = red_channel_client_get_channel(rcc);
+        return reds_get_agent_data_buffer(red_channel_get_server(channel), mcc, size);
+    } else if (size > sizeof(mcc->priv->recv_buf)) {
+        /* message too large, caller will log a message and close the connection */
+        return NULL;
+    } else {
+        return mcc->priv->recv_buf;
     }
-    self->priv->ping_interval = PING_INTERVAL;
-#endif
 }
 
-static void main_channel_client_finalize(GObject *object)
+static void
+main_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
+                                        uint16_t type, uint32_t size, uint8_t *msg)
 {
-#ifdef RED_STATISTICS
-    MainChannelClient *self = MAIN_CHANNEL_CLIENT(object);
-    RedsState *reds =
-        red_channel_get_server(red_channel_client_get_channel(RED_CHANNEL_CLIENT(object)));
-
-    reds_core_timer_remove(reds, self->priv->ping_timer);
-#endif
-    G_OBJECT_CLASS(main_channel_client_parent_class)->finalize(object);
+    if (type == SPICE_MSGC_MAIN_AGENT_DATA) {
+        RedChannel *channel = red_channel_client_get_channel(rcc);
+        reds_release_agent_data_buffer(red_channel_get_server(channel), msg);
+    }
 }
 
 static void main_channel_client_class_init(MainChannelClientClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    RedChannelClientClass *client_class = RED_CHANNEL_CLIENT_CLASS(klass);
 
     g_type_class_add_private(klass, sizeof(MainChannelClientPrivate));
 
     object_class->get_property = main_channel_client_get_property;
     object_class->set_property = main_channel_client_set_property;
-    object_class->finalize = main_channel_client_finalize;
-    object_class->constructed = main_channel_client_constructed;
+
+    client_class->alloc_recv_buf = main_channel_client_alloc_msg_rcv_buf;
+    client_class->release_recv_buf = main_channel_client_release_msg_rcv_buf;
 
     g_object_class_install_property(object_class,
                                     PROP_CONNECTION_ID,
@@ -224,7 +221,7 @@ static void main_channel_client_init(MainChannelClient *self)
     self->priv->bitrate_per_sec = ~0;
 }
 
-static int main_channel_client_push_ping(MainChannelClient *mcc, int size);
+static bool main_channel_client_push_ping(MainChannelClient *mcc, int size);
 
 static void main_notify_item_free(RedPipeItem *base)
 {
@@ -272,7 +269,7 @@ static RedPipeItem *red_ping_item_new(int size)
     return &item->base;
 }
 
-static int main_channel_client_push_ping(MainChannelClient *mcc, int size)
+static bool main_channel_client_push_ping(MainChannelClient *mcc, int size)
 {
     RedPipeItem *item;
 
@@ -486,7 +483,7 @@ void main_channel_client_handle_pong(MainChannelClient *mcc, SpiceMsgPing *ping,
         /*
          * channel client monitors the connectivity using ping-pong messages
          */
-        red_channel_client_handle_message(rcc, size, SPICE_MSGC_PONG, ping);
+        red_channel_client_handle_message(rcc, SPICE_MSGC_PONG, size, ping);
         return;
     }
 
@@ -510,7 +507,7 @@ void main_channel_client_handle_pong(MainChannelClient *mcc, SpiceMsgPing *ping,
                            "bandwidth", mcc->priv->latency, roundtrip);
             mcc->priv->latency = 0;
             mcc->priv->net_test_stage = NET_TEST_STAGE_INVALID;
-            red_channel_client_start_connectivity_monitoring(RED_CHANNEL_CLIENT(mcc),
+            red_channel_client_start_connectivity_monitoring(rcc,
                                                              CLIENT_CONNECTIVITY_TIMEOUT);
             break;
         }
@@ -522,7 +519,7 @@ void main_channel_client_handle_pong(MainChannelClient *mcc, SpiceMsgPing *ping,
                        mcc->priv->bitrate_per_sec,
                        (double)mcc->priv->bitrate_per_sec / 1024 / 1024,
                        main_channel_client_is_low_bandwidth(mcc) ? " LOW BANDWIDTH" : "");
-        red_channel_client_start_connectivity_monitoring(RED_CHANNEL_CLIENT(mcc),
+        red_channel_client_start_connectivity_monitoring(rcc,
                                                          CLIENT_CONNECTIVITY_TIMEOUT);
         break;
     default:
@@ -584,8 +581,8 @@ gboolean main_channel_client_migrate_src_complete(MainChannelClient *mcc,
     gboolean ret = FALSE;
     RedChannelClient *rcc = RED_CHANNEL_CLIENT(mcc);
     RedClient *client = red_channel_client_get_client(rcc);
-    int semi_seamless_support = red_channel_client_test_remote_cap(rcc,
-                                                                   SPICE_MAIN_CAP_SEMI_SEAMLESS_MIGRATE);
+    bool semi_seamless_support = red_channel_client_test_remote_cap(rcc,
+                                                                    SPICE_MAIN_CAP_SEMI_SEAMLESS_MIGRATE);
     if (semi_seamless_support && mcc->priv->mig_connect_ok) {
         if (success) {
             spice_printerr("client %p MIGRATE_END", client);
@@ -610,78 +607,20 @@ gboolean main_channel_client_migrate_src_complete(MainChannelClient *mcc,
     return ret;
 }
 
-#ifdef RED_STATISTICS
-static void do_ping_client(MainChannelClient *mcc,
-    const char *opt, int has_interval, int interval)
-{
-    RedChannel *channel = red_channel_client_get_channel(RED_CHANNEL_CLIENT(mcc));
-    spice_printerr("");
-    if (!opt) {
-        main_channel_client_push_ping(mcc, 0);
-    } else if (!strcmp(opt, "on")) {
-        if (has_interval && interval > 0) {
-            mcc->priv->ping_interval = interval * MSEC_PER_SEC;
-        }
-        reds_core_timer_start(red_channel_get_server(channel),
-                              mcc->priv->ping_timer, mcc->priv->ping_interval);
-    } else if (!strcmp(opt, "off")) {
-        reds_core_timer_cancel(red_channel_get_server(channel),
-                               mcc->priv->ping_timer);
-    } else {
-        return;
-    }
-}
-
-static void ping_timer_cb(void *opaque)
-{
-    MainChannelClient *mcc = opaque;
-    RedChannel *channel = red_channel_client_get_channel(RED_CHANNEL_CLIENT(mcc));
-
-    if (!red_channel_client_is_connected(RED_CHANNEL_CLIENT(mcc))) {
-        spice_printerr("not connected to peer, ping off");
-        reds_core_timer_cancel(red_channel_get_server(channel),
-                               mcc->priv->ping_timer);
-        return;
-    }
-    do_ping_client(mcc, NULL, 0, 0);
-    reds_core_timer_start(red_channel_get_server(channel),
-                          mcc->priv->ping_timer, mcc->priv->ping_interval);
-}
-#endif /* RED_STATISTICS */
-
 MainChannelClient *main_channel_client_create(MainChannel *main_chan, RedClient *client,
                                               RedsStream *stream, uint32_t connection_id,
-                                              int num_common_caps, uint32_t *common_caps,
-                                              int num_caps, uint32_t *caps)
+                                              RedChannelCapabilities *caps)
 {
     MainChannelClient *mcc;
-    GArray *common_caps_array = NULL, *caps_array = NULL;
-
-    if (common_caps) {
-        common_caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*common_caps),
-                                              num_common_caps);
-        g_array_append_vals(common_caps_array, common_caps, num_common_caps);
-    }
-    if (caps) {
-        caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*caps), num_caps);
-        g_array_append_vals(caps_array, caps, num_caps);
-    }
 
     mcc = g_initable_new(TYPE_MAIN_CHANNEL_CLIENT,
                          NULL, NULL,
                          "channel", RED_CHANNEL(main_chan),
                          "client", client,
                          "stream", stream,
-                         "monitor-latency", FALSE,
-                         "caps", caps_array,
-                         "common-caps", common_caps_array,
+                         "caps", caps,
                          "connection-id", connection_id,
                          NULL);
-
-    if (caps_array)
-        g_array_unref(caps_array);
-    if (common_caps_array)
-        g_array_unref(common_caps_array);
 
     return mcc;
 }

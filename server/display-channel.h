@@ -15,6 +15,7 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef DISPLAY_CHANNEL_H_
 # define DISPLAY_CHANNEL_H_
 
@@ -140,8 +141,6 @@ typedef struct RedMonitorsConfigItem {
     MonitorsConfig *monitors_config;
 } RedMonitorsConfigItem;
 
-MonitorsConfig*            monitors_config_new                       (QXLHead *heads, ssize_t nheads,
-                                                                      ssize_t max);
 MonitorsConfig *           monitors_config_ref                       (MonitorsConfig *config);
 void                       monitors_config_unref                     (MonitorsConfig *config);
 
@@ -162,7 +161,14 @@ typedef struct DrawContext {
 
 typedef struct RedSurface {
     uint32_t refs;
+    /* A Ring representing a hierarchical tree structure. This tree includes
+     * DrawItems, Containers, and Shadows. It is used to efficiently determine
+     * which drawables overlap, and to exclude regions of drawables that are
+     * obscured by other drawables */
     Ring current;
+    /* A ring of pending Drawables associated with this surface. This ring is
+     * actually used for drawing. The ring is maintained in order of age, the
+     * tail being the oldest drawable. */
     Ring current_list;
     DrawContext context;
 
@@ -173,20 +179,12 @@ typedef struct RedSurface {
     QXLReleaseInfoExt create, destroy;
 } RedSurface;
 
-#define NUM_DRAWABLES 1000
-typedef struct _Drawable _Drawable;
-struct _Drawable {
-    union {
-        Drawable drawable;
-        _Drawable *next;
-    } u;
-};
-
 #define FOREACH_DCC(_channel, _iter, _data) \
     GLIST_FOREACH((_channel ? red_channel_get_clients(RED_CHANNEL(_channel)) : NULL), \
                   _iter, DisplayChannelClient, _data)
 
 int display_channel_get_stream_id(DisplayChannel *display, Stream *stream);
+Stream *display_channel_get_nth_stream(DisplayChannel *display, gint i);
 
 typedef struct RedSurfaceDestroyItem {
     RedPipeItem pipe_item;
@@ -238,7 +236,7 @@ void                       display_channel_surface_unref             (DisplayCha
                                                                       uint32_t surface_id);
 void                       display_channel_current_flush             (DisplayChannel *display,
                                                                       int surface_id);
-int                        display_channel_wait_for_migrate_data     (DisplayChannel *display);
+bool                       display_channel_wait_for_migrate_data     (DisplayChannel *display);
 void                       display_channel_flush_all_surfaces        (DisplayChannel *display);
 void                       display_channel_free_glz_drawables_to_free(DisplayChannel *display);
 void                       display_channel_free_glz_drawables        (DisplayChannel *display);

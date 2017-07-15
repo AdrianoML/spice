@@ -15,8 +15,9 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef REDS_PRIVATE_H
-#define REDS_PRIVATE_H
+
+#ifndef REDS_PRIVATE_H_
+#define REDS_PRIVATE_H_
 
 #include <spice/protocol.h>
 #include <spice/stats.h>
@@ -25,6 +26,7 @@
 #include "main-channel.h"
 #include "inputs-channel.h"
 #include "stat-file.h"
+#include "red-record-qxl.h"
 
 #define MIGRATE_TIMEOUT (MSEC_PER_SEC * 10)
 #define MM_TIME_DELTA 400 /*ms*/
@@ -56,15 +58,6 @@ typedef struct RedsMigTargetClient {
     RedClient *client;
     GList *pending_links;
 } RedsMigTargetClient;
-
-/* Intermediate state for on going monitors config message from a single
- * client, being passed to the guest */
-typedef struct RedsClientMonitorsConfig {
-    MainChannelClient *mcc;
-    uint8_t *buffer;
-    int buffer_size;
-    int buffer_pos;
-} RedsClientMonitorsConfig;
 
 typedef struct ChannelSecurityOptions ChannelSecurityOptions;
 
@@ -125,7 +118,10 @@ struct RedsState {
 #endif
     int allow_multiple_clients;
 
-    RedsClientMonitorsConfig client_monitors_config;
+    /* Intermediate state for on going monitors config message from a single
+     * client, being passed to the guest */
+    SpiceBuffer client_monitors_config;
+
     int mm_time_enabled;
     uint32_t mm_time_latency;
 
@@ -135,9 +131,10 @@ struct RedsState {
     SpiceCoreInterfaceInternal core;
     GList *qxl_instances;
     MainDispatcher *main_dispatcher;
+    RedRecord *record;
 };
 
 #define FOREACH_QXL_INSTANCE(_reds, _iter, _qxl) \
     GLIST_FOREACH(_reds->qxl_instances, _iter, QXLInstance, _qxl)
 
-#endif
+#endif /* REDS_PRIVATE_H_ */

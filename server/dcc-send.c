@@ -85,8 +85,8 @@ static int dcc_pixmap_cache_hit(DisplayChannelClient *dcc, uint64_t id, int *los
 }
 
 /* set area=NULL for testing the whole surface */
-static int is_surface_area_lossy(DisplayChannelClient *dcc, uint32_t surface_id,
-                                 const SpiceRect *area, SpiceRect *out_lossy_area)
+static bool is_surface_area_lossy(DisplayChannelClient *dcc, uint32_t surface_id,
+                                  const SpiceRect *area, SpiceRect *out_lossy_area)
 {
     RedSurface *surface;
     QRegion *surface_lossy_region;
@@ -127,8 +127,8 @@ static int is_surface_area_lossy(DisplayChannelClient *dcc, uint32_t surface_id,
    to the client, returns false. "area" is for surfaces. If area = NULL,
    all the surface is considered. out_lossy_data will hold info about the bitmap, and its lossy
    area in case it is lossy and part of a surface. */
-static int is_bitmap_lossy(RedChannelClient *rcc, SpiceImage *image, SpiceRect *area,
-                           BitmapData *out_data)
+static bool is_bitmap_lossy(RedChannelClient *rcc, SpiceImage *image, SpiceRect *area,
+                            BitmapData *out_data)
 {
     DisplayChannelClient *dcc = DISPLAY_CHANNEL_CLIENT(rcc);
 
@@ -163,8 +163,8 @@ static int is_bitmap_lossy(RedChannelClient *rcc, SpiceImage *image, SpiceRect *
                                  area, &out_data->lossy_rect);
 }
 
-static int is_brush_lossy(RedChannelClient *rcc, SpiceBrush *brush,
-                          BitmapData *out_data)
+static bool is_brush_lossy(RedChannelClient *rcc, SpiceBrush *brush,
+                           BitmapData *out_data)
 {
     if (brush->type == SPICE_BRUSH_TYPE_PATTERN) {
         return is_bitmap_lossy(rcc, brush->u.pattern.pat, NULL,
@@ -197,13 +197,13 @@ static void red_display_add_image_to_pixmap_cache(RedChannelClient *rcc,
                 io_image->descriptor.flags |= SPICE_IMAGE_FLAGS_CACHE_ME;
                 dcc->priv->send_data.pixmap_cache_items[dcc->priv->send_data.num_pixmap_cache_items++] =
                                                                                image->descriptor.id;
-                stat_inc_counter(reds, display_channel->priv->add_to_cache_counter, 1);
+                stat_inc_counter(display_channel->priv->add_to_cache_counter, 1);
             }
         }
     }
 
     if (!(io_image->descriptor.flags & SPICE_IMAGE_FLAGS_CACHE_ME)) {
-        stat_inc_counter(reds, display_channel->priv->non_cache_counter, 1);
+        stat_inc_counter(display_channel->priv->non_cache_counter, 1);
     }
 }
 
@@ -393,7 +393,7 @@ static FillBitsType fill_bits(DisplayChannelClient *dcc, SpiceMarshaller *m,
                                      &bitmap_palette_out, &lzplt_palette_out);
                 spice_assert(bitmap_palette_out == NULL);
                 spice_assert(lzplt_palette_out == NULL);
-                stat_inc_counter(reds, display->priv->cache_hits_counter, 1);
+                stat_inc_counter(display->priv->cache_hits_counter, 1);
                 pthread_mutex_unlock(&dcc->priv->pixmap_cache->lock);
                 return FILL_BITS_TYPE_CACHE;
             } else {
@@ -607,9 +607,9 @@ static void surface_lossy_region_update(DisplayChannelClient *dcc,
     }
 }
 
-static int drawable_intersects_with_areas(Drawable *drawable, int surface_ids[],
-                                          SpiceRect *surface_areas[],
-                                          int num_surfaces)
+static bool drawable_intersects_with_areas(Drawable *drawable, int surface_ids[],
+                                           SpiceRect *surface_areas[],
+                                           int num_surfaces)
 {
     int i;
     for (i = 0; i < num_surfaces; i++) {
@@ -622,10 +622,10 @@ static int drawable_intersects_with_areas(Drawable *drawable, int surface_ids[],
     return FALSE;
 }
 
-static int pipe_rendered_drawables_intersect_with_areas(DisplayChannelClient *dcc,
-                                                        int surface_ids[],
-                                                        SpiceRect *surface_areas[],
-                                                        int num_surfaces)
+static bool pipe_rendered_drawables_intersect_with_areas(DisplayChannelClient *dcc,
+                                                         int surface_ids[],
+                                                         SpiceRect *surface_areas[],
+                                                         int num_surfaces)
 {
     GList *l;
 
@@ -650,8 +650,8 @@ static int pipe_rendered_drawables_intersect_with_areas(DisplayChannelClient *dc
     return FALSE;
 }
 
-static int drawable_depends_on_areas(Drawable *drawable, int surface_ids[],
-                                     SpiceRect surface_areas[], int num_surfaces)
+static bool drawable_depends_on_areas(Drawable *drawable, int surface_ids[],
+                                      SpiceRect surface_areas[], int num_surfaces)
 {
     int i;
     RedDrawable *red_drawable;
@@ -1680,9 +1680,9 @@ static void red_release_video_encoder_buffer(uint8_t *data, void *opaque)
     buffer->free(buffer);
 }
 
-static int red_marshall_stream_data(RedChannelClient *rcc,
-                                    SpiceMarshaller *base_marshaller,
-                                    Drawable *drawable)
+static bool red_marshall_stream_data(RedChannelClient *rcc,
+                                     SpiceMarshaller *base_marshaller,
+                                     Drawable *drawable)
 {
     DisplayChannelClient *dcc = DISPLAY_CHANNEL_CLIENT(rcc);
     DisplayChannel *display = DCC_TO_DC(dcc);

@@ -27,15 +27,51 @@ G_DEFINE_TYPE(InputsChannelClient, inputs_channel_client, RED_TYPE_CHANNEL_CLIEN
 #define INPUTS_CHANNEL_CLIENT_PRIVATE(o) \
     (G_TYPE_INSTANCE_GET_PRIVATE((o), TYPE_INPUTS_CHANNEL_CLIENT, InputsChannelClientPrivate))
 
+// TODO: RECEIVE_BUF_SIZE used to be the same for inputs_channel and main_channel
+// since it was defined once in reds.c which contained both.
+// Now that they are split we can give a more fitting value for inputs - what
+// should it be?
+#define REDS_AGENT_WINDOW_SIZE 10
+#define REDS_NUM_INTERNAL_AGENT_MESSAGES 1
+
+// approximate max receive message size
+#define RECEIVE_BUF_SIZE \
+    (4096 + (REDS_AGENT_WINDOW_SIZE + REDS_NUM_INTERNAL_AGENT_MESSAGES) * SPICE_AGENT_MAX_DATA_SIZE)
+
 struct InputsChannelClientPrivate
 {
     uint16_t motion_count;
+    uint8_t recv_buf[RECEIVE_BUF_SIZE];
 };
+
+static uint8_t *
+inputs_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
+                                        uint16_t type, uint32_t size)
+{
+    if (size > RECEIVE_BUF_SIZE) {
+        spice_printerr("error: too large incoming message");
+        return NULL;
+    }
+
+    InputsChannelClient *icc = INPUTS_CHANNEL_CLIENT(rcc);
+    return icc->priv->recv_buf;
+}
+
+static void
+inputs_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
+                                          uint16_t type, uint32_t size, uint8_t *msg)
+{
+}
 
 static void
 inputs_channel_client_class_init(InputsChannelClientClass *klass)
 {
+    RedChannelClientClass *client_class = RED_CHANNEL_CLIENT_CLASS(klass);
+
     g_type_class_add_private(klass, sizeof(InputsChannelClientPrivate));
+
+    client_class->alloc_recv_buf = inputs_channel_client_alloc_msg_rcv_buf;
+    client_class->release_recv_buf = inputs_channel_client_release_msg_rcv_buf;
 }
 
 static void
@@ -47,38 +83,17 @@ inputs_channel_client_init(InputsChannelClient *self)
 RedChannelClient* inputs_channel_client_create(RedChannel *channel,
                                                RedClient *client,
                                                RedsStream *stream,
-                                               int monitor_latency,
-                                               int num_common_caps,
-                                               uint32_t *common_caps,
-                                               int num_caps,
-                                               uint32_t *caps)
+                                               RedChannelCapabilities *caps)
 {
     RedChannelClient *rcc;
-    GArray *common_caps_array = NULL, *caps_array = NULL;
 
-    if (common_caps) {
-        common_caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*common_caps),
-                                              num_common_caps);
-        g_array_append_vals(common_caps_array, common_caps, num_common_caps);
-    }
-    if (caps) {
-        caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*caps), num_caps);
-        g_array_append_vals(caps_array, caps, num_caps);
-    }
     rcc = g_initable_new(TYPE_INPUTS_CHANNEL_CLIENT,
                          NULL, NULL,
                          "channel", channel,
                          "client", client,
                          "stream", stream,
-                         "monitor-latency", monitor_latency,
-                         "caps", caps_array,
-                         "common-caps", common_caps_array,
+                         "caps", caps,
                          NULL);
-
-    if (caps_array)
-        g_array_unref(caps_array);
-    if (common_caps_array)
-        g_array_unref(common_caps_array);
 
     return rcc;
 }

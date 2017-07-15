@@ -15,8 +15,8 @@
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef SMARTCARD_CHANNEL_CLIENT_H__
-#define SMARTCARD_CHANNEL_CLIENT_H__
+#ifndef SMARTCARD_CHANNEL_CLIENT_H_
+#define SMARTCARD_CHANNEL_CLIENT_H_
 
 #include <glib-object.h>
 
@@ -57,20 +57,9 @@ GType smart_card_channel_client_get_type(void) G_GNUC_CONST;
 
 SmartCardChannelClient* smartcard_channel_client_create(RedChannel *channel,
                                                         RedClient *client, RedsStream *stream,
-                                                        int monitor_latency,
-                                                        int num_common_caps, uint32_t *common_caps,
-                                                        int num_caps, uint32_t *caps);
+                                                        RedChannelCapabilities *caps);
 
-uint8_t* smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
-                                                    uint16_t type,
-                                                    uint32_t size);
-
-void smartcard_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
-                                                  uint16_t type,
-                                                  uint32_t size,
-                                                  uint8_t *msg);
-
-int smartcard_channel_client_handle_migrate_flush_mark(RedChannelClient *rcc);
+bool smartcard_channel_client_handle_migrate_flush_mark(RedChannelClient *rcc);
 
 void smartcard_channel_client_on_disconnect(RedChannelClient *rcc);
 
@@ -83,29 +72,20 @@ void smartcard_channel_client_send_error(RedChannelClient *rcc,
                                          SpiceMarshaller *m,
                                          RedPipeItem *item);
 
-int smartcard_channel_client_handle_message(RedChannelClient *rcc,
-                                            uint16_t type,
-                                            uint32_t size,
-                                            uint8_t *msg);
+bool smartcard_channel_client_handle_message(RedChannelClient *rcc,
+                                             uint16_t type,
+                                             uint32_t size,
+                                             void *msg);
 
-int smartcard_channel_client_handle_migrate_data(RedChannelClient *rcc,
-                                                 uint32_t size,
-                                                 void *message);
+bool smartcard_channel_client_handle_migrate_data(RedChannelClient *rcc,
+                                                  uint32_t size,
+                                                  void *message);
 
 void smartcard_channel_client_set_char_device(SmartCardChannelClient *scc,
                                               RedCharDeviceSmartcard *device);
 
 RedCharDeviceSmartcard* smartcard_channel_client_get_char_device(SmartCardChannelClient *scc);
 
-void smartcard_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
-                                                  uint16_t type,
-                                                  uint32_t size,
-                                                  uint8_t *msg);
-
-uint8_t *smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
-                                                    uint16_t type,
-                                                    uint32_t size);
-
 G_END_DECLS
 
-#endif /* SMARTCARD_CHANNEL_CLIENT_H__ */
+#endif /* SMARTCARD_CHANNEL_CLIENT_H_ */

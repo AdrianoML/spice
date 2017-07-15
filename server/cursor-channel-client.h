@@ -15,8 +15,9 @@
    You should have received a copy of the GNU Lesser General Public
    License along with this library; if not, see <http://www.gnu.org/licenses/>.
 */
+
 #ifndef CURSOR_CHANNEL_CLIENT_H_
-# define CURSOR_CHANNEL_CLIENT_H_
+#define CURSOR_CHANNEL_CLIENT_H_
 
 #include <glib-object.h>
 
@@ -45,9 +46,8 @@ typedef struct CursorChannelClient CursorChannelClient;
 typedef struct CursorChannelClientClass CursorChannelClientClass;
 typedef struct CursorChannelClientPrivate CursorChannelClientPrivate;
 
-struct CursorChannelClient
-{
-    RedChannelClient parent;
+struct CursorChannelClient {
+    CommonGraphicsChannelClient parent;
 
     CursorChannelClientPrivate *priv;
 };
@@ -63,9 +63,7 @@ CursorChannelClient* cursor_channel_client_new(CursorChannel *cursor,
                                                RedClient *client,
                                                RedsStream *stream,
                                                int mig_target,
-                                               uint32_t *common_caps,
-                                               int num_common_caps,
-                                               uint32_t *caps, int num_caps);
+                                               RedChannelCapabilities *caps);
 
 void cursor_channel_client_reset_cursor_cache(RedChannelClient *rcc);
 void cursor_channel_client_on_disconnect(RedChannelClient *rcc);

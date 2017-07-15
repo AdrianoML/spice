@@ -35,7 +35,7 @@
 #define CURSOR_CACHE_HASH_KEY(id) ((id) & CURSOR_CACHE_HASH_MASK)
 #define CURSOR_CLIENT_TIMEOUT 30000000000ULL //nano
 
-G_DEFINE_TYPE(CursorChannelClient, cursor_channel_client, RED_TYPE_CHANNEL_CLIENT)
+G_DEFINE_TYPE(CursorChannelClient, cursor_channel_client, TYPE_COMMON_GRAPHICS_CHANNEL_CLIENT)
 
 #define CURSOR_CHANNEL_CLIENT_PRIVATE(o) \
     (G_TYPE_INSTANCE_GET_PRIVATE((o), TYPE_CURSOR_CHANNEL_CLIENT, CursorChannelClientPrivate))
@@ -93,37 +93,18 @@ void cursor_channel_client_migrate(RedChannelClient *rcc)
 
 CursorChannelClient* cursor_channel_client_new(CursorChannel *cursor, RedClient *client, RedsStream *stream,
                                                int mig_target,
-                                               uint32_t *common_caps, int num_common_caps,
-                                               uint32_t *caps, int num_caps)
+                                               RedChannelCapabilities *caps)
 {
     CursorChannelClient *rcc;
-    GArray *common_caps_array = NULL, *caps_array = NULL;
-
-    if (common_caps) {
-        common_caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*common_caps),
-                                              num_common_caps);
-        g_array_append_vals(common_caps_array, common_caps, num_common_caps);
-    }
-    if (caps) {
-        caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*caps), num_caps);
-        g_array_append_vals(caps_array, caps, num_caps);
-    }
 
     rcc = g_initable_new(TYPE_CURSOR_CHANNEL_CLIENT,
                          NULL, NULL,
                          "channel", cursor,
                          "client", client,
                          "stream", stream,
-                         "monitor-latency", FALSE,
-                         "common-caps", common_caps_array,
-                         "caps", caps_array,
+                         "caps", caps,
                          NULL);
     common_graphics_channel_set_during_target_migrate(COMMON_GRAPHICS_CHANNEL(cursor), mig_target);
-
-    if (caps_array)
-        g_array_unref(caps_array);
-    if (common_caps_array)
-        g_array_unref(common_caps_array);
 
     return rcc;
 }

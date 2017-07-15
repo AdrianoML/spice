@@ -78,6 +78,9 @@ display_channel_finalize(GObject *object)
 {
     DisplayChannel *self = DISPLAY_CHANNEL(object);
 
+    display_channel_destroy_surfaces(self);
+    image_cache_reset(&self->priv->image_cache);
+    monitors_config_unref(self->priv->monitors_config);
     g_array_unref(self->priv->video_codecs);
     g_free(self->priv);
 
@@ -150,7 +153,7 @@ static void monitors_config_debug(MonitorsConfig *mc)
                     mc->heads[i].width, mc->heads[i].height);
 }
 
-MonitorsConfig* monitors_config_new(QXLHead *heads, ssize_t nheads, ssize_t max)
+static MonitorsConfig* monitors_config_new(QXLHead *heads, ssize_t nheads, ssize_t max)
 {
     MonitorsConfig *mc;
 
@@ -192,13 +195,13 @@ void display_channel_set_stream_video(DisplayChannel *display, int stream_video)
 
     switch (stream_video) {
     case SPICE_STREAM_VIDEO_ALL:
-        spice_info("sv all");
+        spice_debug("sv all");
         break;
     case SPICE_STREAM_VIDEO_FILTER:
-        spice_info("sv filter");
+        spice_debug("sv filter");
         break;
     case SPICE_STREAM_VIDEO_OFF:
-        spice_info("sv off");
+        spice_debug("sv off");
         break;
     default:
         spice_warn_if_reached();
@@ -214,6 +217,7 @@ void display_channel_set_video_codecs(DisplayChannel *display, GArray *video_cod
 
     g_clear_pointer(&display->priv->video_codecs, g_array_unref);
     display->priv->video_codecs = g_array_ref(video_codecs);
+    g_object_notify(G_OBJECT(display), "video-codecs");
 }
 
 GArray *display_channel_get_video_codecs(DisplayChannel *display)
@@ -239,7 +243,7 @@ static void stop_streams(DisplayChannel *display)
         if (!stream->current) {
             stream_stop(display, stream);
         } else {
-            spice_info("attached stream");
+            spice_debug("attached stream");
         }
     }
 
@@ -389,10 +393,11 @@ static void current_add_drawable(DisplayChannel *display,
     ring_add_after(&drawable->tree_item.base.siblings_link, pos);
     ring_add(&display->priv->current_list, &drawable->list_link);
     ring_add(&surface->current_list, &drawable->surface_list_link);
-    display->priv->current_size++;
     drawable->refs++;
 }
 
+/* Unrefs the drawable and removes it from any rings that it's in, as well as
+ * removing any associated shadow item */
 static void current_remove_drawable(DisplayChannel *display, Drawable *item)
 {
     /* todo: move all to unref? */
@@ -402,7 +407,6 @@ static void current_remove_drawable(DisplayChannel *display, Drawable *item)
     ring_remove(&item->list_link);
     ring_remove(&item->surface_list_link);
     drawable_unref(item);
-    display->priv->current_size--;
 }
 
 static void drawable_remove_from_pipes(Drawable *drawable)
@@ -422,6 +426,7 @@ static void drawable_remove_from_pipes(Drawable *drawable)
     }
 }
 
+/* This function should never be called for Shadow TreeItems */
 static void current_remove(DisplayChannel *display, TreeItem *item)
 {
     TreeItem *now = item;
@@ -442,19 +447,32 @@ static void current_remove(DisplayChannel *display, TreeItem *item)
             spice_assert(now->type == TREE_ITEM_TYPE_CONTAINER);
 
             if ((ring_item = ring_get_head(&now_as_container->items))) {
+                /* descend into the container's child ring and continue
+                 * iterating and removing those children */
                 now = SPICE_CONTAINEROF(ring_item, TreeItem, siblings_link);
                 continue;
             }
+            /* This item is a container but it has no children, so reset our
+             * iterator to the item's previous sibling and free this empty
+             * container */
             ring_item = now->siblings_link.prev;
             container_free(now_as_container);
         }
         if (now == item) {
+            /* This is true if the initial @item was a DRAWABLE, or if @item
+             * was a container and we've finished iterating over all of that
+             * container's children and returned back up to the parent and
+             * freed it (see below) */
             return;
         }
 
+        /* Increment the iterator to the next sibling. Note that if an item was
+         * removed above, ring_item will have been reset to the item before the
+         * item that was removed */
         if ((ring_item = ring_next(&container_of_now->items, ring_item))) {
             now = SPICE_CONTAINEROF(ring_item, TreeItem, siblings_link);
         } else {
+            /* there is no next sibling, so move one level up the tree */
             now = &container_of_now->base;
         }
     }
@@ -467,11 +485,24 @@ static void current_remove_all(DisplayChannel *display, int surface_id)
 
     while ((ring_item = ring_get_head(ring))) {
         TreeItem *now = SPICE_CONTAINEROF(ring_item, TreeItem, siblings_link);
+        /* NOTE: current_remove() should never be called on Shadow type items
+         * or we will hit an assert. Fortunately, the 'current' ring is ordered
+         * in such a way that a DrawItem will always be placed before its
+         * associated Shadow in the tree. Since removing a DrawItem will also
+         * result in the associated Shadow item being removed from the tree,
+         * this loop will never call current_remove() on a Shadow item unless
+         * we change the order that items are inserted into the tree */
         current_remove(display, now);
     }
 }
 
-static int current_add_equal(DisplayChannel *display, DrawItem *item, TreeItem *other)
+/* Replace an existing Drawable in the tree with a new drawable that is
+ * equivalent. The new drawable is also added to the pipe.
+ *
+ * This function can fail if the items aren't actually equivalent (e.g. either
+ * item has a shadow, they have different effects, etc)
+ */
+static bool current_add_equal(DisplayChannel *display, DrawItem *item, TreeItem *other)
 {
     DrawItem *other_draw_item;
     Drawable *drawable;
@@ -490,6 +521,9 @@ static int current_add_equal(DisplayChannel *display, DrawItem *item, TreeItem *
     other_drawable = SPICE_CONTAINEROF(other_draw_item, Drawable, tree_item);
 
     if (item->effect == QXL_EFFECT_OPAQUE) {
+        /* check whether the new item can safely replace the other drawable at
+         * the same position in the pipe, or whether it should be added to the
+         * end of the queue */
         int add_after = !!other_drawable->stream &&
                         is_drawable_independent_from_surfaces(drawable);
         stream_maintenance(display, drawable, other_drawable);
@@ -553,6 +587,48 @@ static int current_add_equal(DisplayChannel *display, DrawItem *item, TreeItem *
     return FALSE;
 }
 
+/* This function excludes the given region from a single TreeItem. Both @rgn
+ * and @item may be modified.
+ *
+ * If there is overlap between @rgn and the @item region, remove the
+ * overlapping intersection from both @rgn and the item's region (NOTE: it's
+ * not clear to me why this is done - jjongsma)
+ *
+ * However, if the item is a DrawItem that has a shadow, we add an additional
+ * region to @rgn: the intersection of the shadow item's region with @rgn when
+ * @rgn is shifted over by the delta between the DrawItem and the Shadow.
+ * [WORKING THEORY: since the destination region for a COPY_BITS operation was
+ * excluded, we no longer need the source region that corresponds with that
+ * copy operation, so we can also exclude any drawables that affect that
+ * region. Not sure if that actually makes sense... ]
+ *
+ * If the item is a Shadow, we store the intersection between @rgn and the
+ * Shadow's region in Shadow::on_hold and remove that region from @rgn. This is
+ * done since a Shadow represents the source region for a COPY_BITS operation,
+ * and we need to make sure that this source region stays up-to-date until the
+ * copy operation is executed.
+ *
+ * Consider the following case:
+ *  1) the surface is fully black at the beginning
+ *  2) we add a new item to the tree which paints region A white
+ *  3) we add a new item to the tree which copies region A to region B
+ *  4) we add another new item to the tree painting region A blue.
+ *
+ * After all operations are completed, region A should be blue, and region B
+ * should be white. If there were no copy operation (step 3), we could simply
+ * eliminate step 2 when we add item 4 to the tree, since step 4 overwrites the
+ * same region with a different color. However, if we did eliminate step 2,
+ * region B would be black after all operations were completed. So these
+ * regions that would normally be excluded are put "on hold" if they are part
+ * of a source region for a copy operation.
+ *
+ * @display: the display channel
+ * @ring: a fallback toplevel ring???
+ * @item: the tree item to exclude from @rgn
+ * @rgn: the region to exclude
+ * @top_ring: ???
+ * @frame_candidate: ???
+ */
 static void __exclude_region(DisplayChannel *display, Ring *ring, TreeItem *item, QRegion *rgn,
                              Ring **top_ring, Drawable *frame_candidate)
 {
@@ -560,28 +636,46 @@ static void __exclude_region(DisplayChannel *display, Ring *ring, TreeItem *item
     stat_start(&display->priv->__exclude_stat, start_time);
 
     region_clone(&and_rgn, rgn);
+    /* find intersection of the @rgn argument with the region of the @item arg */
     region_and(&and_rgn, &item->rgn);
     if (!region_is_empty(&and_rgn)) {
         if (IS_DRAW_ITEM(item)) {
             DrawItem *draw = DRAW_ITEM(item);
 
             if (draw->effect == QXL_EFFECT_OPAQUE) {
+                /* remove the intersection from the original @rgn */
                 region_exclude(rgn, &and_rgn);
             }
 
             if (draw->shadow) {
+                /* @draw represents the destination of a COPY_BITS operation.
+                 * @shadow represents the source item for the copy operation */
                 Shadow *shadow;
                 int32_t x = item->rgn.extents.x1;
                 int32_t y = item->rgn.extents.y1;
 
+                /* remove the intersection from the item's region */
                 region_exclude(&draw->base.rgn, &and_rgn);
                 shadow = draw->shadow;
+                /* shift the intersected region by the difference between the
+                 * source and destination regions */
                 region_offset(&and_rgn, shadow->base.rgn.extents.x1 - x,
                               shadow->base.rgn.extents.y1 - y);
+                /* remove the shifted intersection region from the source
+                 * (shadow) item's region. If the destination is excluded, we
+                 * can also exclude the corresponding area from the source */
                 region_exclude(&shadow->base.rgn, &and_rgn);
+                /* find the intersection between the shifted intersection
+                 * region and the Shadow's 'on_hold' region. This represents
+                 * the portion of the Shadow's region that we just removed that
+                 * is currently stored in on_hold. */
                 region_and(&and_rgn, &shadow->on_hold);
                 if (!region_is_empty(&and_rgn)) {
+                    /* Since we removed a portion of the Shadow's region, we
+                     * can also remove that portion from on_hold */
                     region_exclude(&shadow->on_hold, &and_rgn);
+                    /* Since this region is no longer "on hold", add it back to
+                     * the @rgn argument */
                     region_or(rgn, &and_rgn);
                     // in flat representation of current, shadow is always his owner next
                     if (!tree_item_contained_by(&shadow->base, *top_ring)) {
@@ -589,22 +683,31 @@ static void __exclude_region(DisplayChannel *display, Ring *ring, TreeItem *item
                     }
                 }
             } else {
+                /* TODO: document the purpose of this code */
                 if (frame_candidate) {
                     Drawable *drawable = SPICE_CONTAINEROF(draw, Drawable, tree_item);
                     stream_maintenance(display, frame_candidate, drawable);
                 }
+                /* Remove the intersection from the DrawItem's region */
                 region_exclude(&draw->base.rgn, &and_rgn);
             }
         } else if (item->type == TREE_ITEM_TYPE_CONTAINER) {
+            /* excludes the intersection between 'rgn' and item->rgn from the
+             * item's region */
             region_exclude(&item->rgn, &and_rgn);
 
             if (region_is_empty(&item->rgn)) {  //assume container removal will follow
                 Shadow *shadow;
 
+                /* exclude the intersection from the 'rgn' argument as well,
+                 * but only if the item is now empty.
+                 * TODO: explain why this is necessary */
                 region_exclude(rgn, &and_rgn);
                 if ((shadow = tree_item_find_shadow(item))) {
+                    /* add the shadow's on_hold region back to the 'rgn' argument */
                     region_or(rgn, &shadow->on_hold);
                     if (!tree_item_contained_by(&shadow->base, *top_ring)) {
+                        /* TODO: document why top_ring is set here */
                         *top_ring = tree_item_container_items(&shadow->base, ring);
                     }
                 }
@@ -614,14 +717,42 @@ static void __exclude_region(DisplayChannel *display, Ring *ring, TreeItem *item
 
             spice_assert(item->type == TREE_ITEM_TYPE_SHADOW);
             shadow = SHADOW(item);
+            /* Since a Shadow represents the source region for a COPY_BITS
+             * operation, we need to make sure that we don't remove existing
+             * drawables that draw to this source region. If we did, it would
+             * affect the copy operation. So we remove the intersection between
+             * @rgn and item->rgn from the @rgn argument to avoid excluding
+             * these drawables */
             region_exclude(rgn, &and_rgn);
+            /* adds this intersection to on_hold */
             region_or(&shadow->on_hold, &and_rgn);
         }
     }
+    /* clean up memory */
     region_destroy(&and_rgn);
     stat_add(&display->priv->__exclude_stat, start_time);
 }
 
+/* This function iterates through the given @ring starting at @ring_item and
+ * continuing until reaching @last. and calls __exclude_region() on each item.
+ * Any items that have an empty region as a result of the __exclude_region()
+ * call are removed from the tree.
+ *
+ * TODO: What is the intended use of this function?
+ *
+ * @ring: every time this function is called, @ring is a Surface's 'current'
+ *      ring, or to the ring of children of a container within that ring.
+ * @ring_item: callers usually call this argument 'exclude_base'. We will
+ *      iterate through the tree starting at this item
+ * @rgn: callers usually call this 'exclude_rgn' -- it appears to be the region
+ *      we want to exclude from existing items in the tree. It is an in/out
+ *      parameter and it may be modified as the result of calling this function
+ * @last: We will stop iterating at this item, and the function will return the
+ *      next item after iteration is complete (which may be different than the
+ *      passed value if that item was removed from the tree
+ * @frame_candidate: usually callers pass NULL, sometimes it's the drawable
+ *      that's being added to the 'current' ring. TODO: What is its purpose?
+ */
 static void exclude_region(DisplayChannel *display, Ring *ring, RingItem *ring_item,
                            QRegion *rgn, TreeItem **last, Drawable *frame_candidate)
 {
@@ -640,40 +771,60 @@ static void exclude_region(DisplayChannel *display, Ring *ring, RingItem *ring_i
 
         spice_assert(!region_is_empty(&now->rgn));
 
+        /* check whether the ring_item item intersects the passed-in region */
         if (region_intersects(rgn, &now->rgn)) {
+            /* remove the overlapping portions of region and now->rgn, among
+             * other things. See documentation for __exclude_region() */
             __exclude_region(display, ring, now, rgn, &top_ring, frame_candidate);
 
             if (region_is_empty(&now->rgn)) {
+                /* __exclude_region() does not remove the region of shadow-type
+                 * items */
                 spice_assert(now->type != TREE_ITEM_TYPE_SHADOW);
                 ring_item = now->siblings_link.prev;
+                /* if __exclude_region() removed the entire region for this
+                 * sibling item, remove it from the 'current' tree */
                 current_remove(display, now);
                 if (last && *last == now) {
+                    /* the caller wanted to stop at this item, but this item
+                     * has been removed, so we set @last to the next item */
                     SPICE_VERIFY(SPICE_OFFSETOF(TreeItem, siblings_link) == 0);
                     *last = (TreeItem *)ring_next(ring, ring_item);
                 }
             } else if (now->type == TREE_ITEM_TYPE_CONTAINER) {
+                /* if this sibling is a container type, descend into the
+                 * container's child ring and continue iterating */
                 Container *container = CONTAINER(now);
                 if ((ring_item = ring_get_head(&container->items))) {
                     ring = &container->items;
                     spice_assert(SPICE_CONTAINEROF(ring_item, TreeItem, siblings_link)->container);
                     continue;
                 }
+                /* container had no children, so reset ring_item to the
+                 * container itself */
                 ring_item = &now->siblings_link;
             }
 
             if (region_is_empty(rgn)) {
+                /* __exclude_region() removed the entire region from 'rgn', so
+                 * no need to continue checking further items in the tree */
                 stat_add(&display->priv->exclude_stat, start_time);
                 return;
             }
         }
 
         SPICE_VERIFY(SPICE_OFFSETOF(TreeItem, siblings_link) == 0);
+        /* if this is the last item to check, or if the current ring is
+         * completed, don't go any further */
         while ((last && *last == (TreeItem *)ring_item) ||
                !(ring_item = ring_next(ring, ring_item))) {
+            /* we're currently iterating the top ring, so we're done */
             if (ring == top_ring) {
                 stat_add(&display->priv->exclude_stat, start_time);
                 return;
             }
+            /* we're iterating through a container child ring, so climb one
+             * level up the heirarchy and continue iterating that ring */
             ring_item = &container->base.siblings_link;
             container = container->base.container;
             ring = (container) ? &container->items : top_ring;
@@ -681,7 +832,9 @@ static void exclude_region(DisplayChannel *display, Ring *ring, RingItem *ring_i
     }
 }
 
-static int current_add_with_shadow(DisplayChannel *display, Ring *ring, Drawable *item)
+/* Add a drawable @item (with a shadow) to the current ring.  The return value
+ * indicates whether the new item should be added to the pipe */
+static bool current_add_with_shadow(DisplayChannel *display, Ring *ring, Drawable *item)
 {
     stat_start(&display->priv->add_stat, start_time);
 #ifdef RED_WORKER_STAT
@@ -707,11 +860,19 @@ static int current_add_with_shadow(DisplayChannel *display, Ring *ring, Drawable
         stream_detach_behind(display, &shadow->base.rgn, NULL);
     }
 
+    /* Prepend the shadow to the beginning of the current ring */
     ring_add(ring, &shadow->base.siblings_link);
+    /* Prepend the draw item to the beginning of the current ring. NOTE: this
+     * means that the drawable is placed *before* its associated shadow in the
+     * tree. Changing this order will violate several unstated assumptions */
     current_add_drawable(display, item, ring);
     if (item->tree_item.effect == QXL_EFFECT_OPAQUE) {
         QRegion exclude_rgn;
         region_clone(&exclude_rgn, &item->tree_item.base.rgn);
+        /* Since the new drawable is opaque, remove overlapped regions from all
+         * items already in the tree.  Start iterating through the tree
+         * starting with the shadow item to avoid excluding the new item
+         * itself */
         exclude_region(display, ring, &shadow->base.siblings_link, &exclude_rgn, NULL, NULL);
         region_destroy(&exclude_rgn);
         streams_update_visible_region(display, item);
@@ -724,7 +885,9 @@ static int current_add_with_shadow(DisplayChannel *display, Ring *ring, Drawable
     return TRUE;
 }
 
-static int current_add(DisplayChannel *display, Ring *ring, Drawable *drawable)
+/* Add a @drawable (without a shadow) to the current ring.
+ * The return value indicates whether the new item should be added to the pipe */
+static bool current_add(DisplayChannel *display, Ring *ring, Drawable *drawable)
 {
     DrawItem *item = &drawable->tree_item;
     RingItem *now;
@@ -736,54 +899,112 @@ static int current_add(DisplayChannel *display, Ring *ring, Drawable *drawable)
     region_init(&exclude_rgn);
     now = ring_next(ring, ring);
 
+    /* check whether the new drawable region intersects any of the items
+     * already in the 'current' ring */
     while (now) {
         TreeItem *sibling = SPICE_CONTAINEROF(now, TreeItem, siblings_link);
         int test_res;
 
         if (!region_bounds_intersects(&item->base.rgn, &sibling->rgn)) {
+            /* the bounds of the two items are totally disjoint, so no need to
+             * check further. check the next item */
             now = ring_next(ring, now);
             continue;
         }
+        /* bounds overlap, but check whether the regions actually overlap */
         test_res = region_test(&item->base.rgn, &sibling->rgn, REGION_TEST_ALL);
         if (!(test_res & REGION_TEST_SHARED)) {
+            /* there's no overlap of the regions between these two items. Move
+             * on to the next one. */
             now = ring_next(ring, now);
             continue;
         } else if (sibling->type != TREE_ITEM_TYPE_SHADOW) {
+            /* there is an overlap between the two regions */
+            /* NOTE: Shadow types represent a source region for a COPY_BITS
+             * operation, they don't represent a region that will be drawn.
+             * Therefore, we don't check for overlap between the new
+             * DrawItem and any shadow items */
             if (!(test_res & REGION_TEST_RIGHT_EXCLUSIVE) &&
                                                    !(test_res & REGION_TEST_LEFT_EXCLUSIVE) &&
                                                    current_add_equal(display, item, sibling)) {
+                /* the regions were equivalent, so we just replaced the other
+                 * drawable with the new one */
                 stat_add(&display->priv->add_stat, start_time);
+                /* Caller doesn't need to add the new drawable to the pipe,
+                 * since current_add_equal already added it to the pipe */
                 return FALSE;
             }
 
             if (!(test_res & REGION_TEST_RIGHT_EXCLUSIVE) && item->effect == QXL_EFFECT_OPAQUE) {
+                /* the new drawable is opaque and entirely contains the sibling item */
                 Shadow *shadow;
                 int skip = now == exclude_base;
 
                 if ((shadow = tree_item_find_shadow(sibling))) {
+                    /* The sibling item was the destination of a COPY_BITS operation */
                     if (exclude_base) {
+                        /* During a previous iteration through this loop, an
+                         * obscured sibling item was removed from the tree, and
+                         * exclude_base was set to the item immediately after
+                         * the removed item (see below). This time through the
+                         * loop, we encountered another sibling that was
+                         * completely obscured, so we call exclude_region()
+                         * using the previously saved item as our starting
+                         * point. @exlude_rgn will be the union of any previous
+                         * 'on_hold' regions from the shadows of previous
+                         * iterations
+                         *
+                         * TODO: it's unclear to me why we only only call
+                         * exclude_region() for the previous item if the next
+                         * item is obscured and has a shadow. -jjongsma
+                         */
                         TreeItem *next = sibling;
                         exclude_region(display, ring, exclude_base, &exclude_rgn, &next, NULL);
                         if (next != sibling) {
+                            /* the @next param is only changed if the given item
+                             * was removed as a side-effect of calling
+                             * exclude_region(), so update our loop variable */
                             now = next ? &next->siblings_link : NULL;
                             exclude_base = NULL;
                             continue;
                         }
                     }
+                    /* Since the destination item (sibling) of the COPY_BITS
+                     * operation is fully obscured, we no longer need the
+                     * source item (shadow) anymore. shadow->on_hold represents
+                     * a region that would normally have been excluded by a
+                     * previous call to __exclude_region() (see documentation
+                     * for that function), but was put on hold to make sure we
+                     * kept the source region up to date. Now that we no longer
+                     * need this source region, this "on hold" region can be
+                     * safely excluded again. */
                     region_or(&exclude_rgn, &shadow->on_hold);
                 }
                 now = now->prev;
+                /* remove the obscured sibling from the 'current' tree, which
+                 * will also remove its shadow (if any) */
                 current_remove(display, sibling);
+                /* advance the loop variable */
                 now = ring_next(ring, now);
                 if (shadow || skip) {
+                    /* 'now' is currently set to the item immediately AFTER
+                     * the obscured sibling that we just removed.
+                     * TODO: document why this item is used as an
+                     * 'exclude_base' */
                     exclude_base = now;
                 }
                 continue;
             }
 
             if (!(test_res & REGION_TEST_LEFT_EXCLUSIVE) && is_opaque_item(sibling)) {
+                /* the sibling item is opaque and entirely contains the new drawable */
                 Container *container;
 
+                /* The first time through, @exclude_base will be NULL, but
+                 * subsequent loops may set it to something.  In addition,
+                 * @exclude_rgn starts out empty, but previous iterations of
+                 * this loop may have added various Shadow::on_hold regions to
+                 * it. */
                 if (exclude_base) {
                     exclude_region(display, ring, exclude_base, &exclude_rgn, NULL, NULL);
                     region_clear(&exclude_rgn);
@@ -791,13 +1012,20 @@ static int current_add(DisplayChannel *display, Ring *ring, Drawable *drawable)
                 }
                 if (sibling->type == TREE_ITEM_TYPE_CONTAINER) {
                     container = CONTAINER(sibling);
+                    /* NOTE: here, ring is reset to the ring of the container's children */
                     ring = &container->items;
+                    /* if the sibling item is a container, place the new
+                     * drawable into that container */
                     item->base.container = container;
+                    /* Start iterating over the container's children to see if
+                     * any of them intersect this new drawable */
                     now = ring_next(ring, ring);
                     continue;
                 }
                 spice_assert(IS_DRAW_ITEM(sibling));
                 if (!DRAW_ITEM(sibling)->container_root) {
+                    /* Create a new container to hold the sibling and the new
+                     * drawable */
                     container = container_new(DRAW_ITEM(sibling));
                     if (!container) {
                         spice_warning("create new container failed");
@@ -805,16 +1033,28 @@ static int current_add(DisplayChannel *display, Ring *ring, Drawable *drawable)
                         return FALSE;
                     }
                     item->base.container = container;
+                    /* reset 'ring' to the container's children ring, so that
+                     * we can add the new drawable to this ring below */
                     ring = &container->items;
                 }
             }
         }
+        /* If we've gotten here, that means that:
+         *  - the new item is not opaque
+         *  - We just created a container to hold the new drawable and the
+         *    sibling that encloses it
+         *  - ??? */
         if (!exclude_base) {
             exclude_base = now;
         }
         break;
     }
+    /* we've removed any obscured siblings and figured out which ring the new
+     * drawable needs to be added to, so let's add it. */
     if (item->effect == QXL_EFFECT_OPAQUE) {
+        /* @exclude_rgn may contain the union of on_hold regions from any
+         * Shadows that were associated with DrawItems that were removed from
+         * the tree.  Add the new item's region to that */
         region_or(&exclude_rgn, &item->base.rgn);
         exclude_region(display, ring, exclude_base, &exclude_rgn, NULL, drawable);
         stream_trace_update(display, drawable);
@@ -885,17 +1125,17 @@ static bool drawable_can_stream(DisplayChannel *display, Drawable *drawable)
 static void display_channel_print_stats(DisplayChannel *display)
 {
     stat_time_t total = display->priv->add_stat.total;
-    spice_info("add with shadow count %u",
+    spice_debug("add with shadow count %u",
                display->priv->add_with_shadow_count);
     display->priv->add_with_shadow_count = 0;
-    spice_info("add[%u] %f exclude[%u] %f __exclude[%u] %f",
+    spice_debug("add[%u] %f exclude[%u] %f __exclude[%u] %f",
                display->priv->add_stat.count,
                stat_cpu_time_to_sec(total),
                display->priv->exclude_stat.count,
                stat_cpu_time_to_sec(display->priv->exclude_stat.total),
                display->priv->__exclude_stat.count,
                stat_cpu_time_to_sec(display->priv->__exclude_stat.total));
-    spice_info("add %f%% exclude %f%% exclude2 %f%% __exclude %f%%",
+    spice_debug("add %f%% exclude %f%% exclude2 %f%% __exclude %f%%",
                (double)(total - display->priv->exclude_stat.total) / total * 100,
                (double)(display->priv->exclude_stat.total) / total * 100,
                (double)(display->priv->exclude_stat.total -
@@ -1003,7 +1243,7 @@ static void surface_add_reverse_dependency(DisplayChannel *display, int surface_
     ring_add(&surface->depend_on_me, &depend_item->ring_item);
 }
 
-static int handle_surface_deps(DisplayChannel *display, Drawable *drawable)
+static bool handle_surface_deps(DisplayChannel *display, Drawable *drawable)
 {
     int x;
 
@@ -1041,7 +1281,7 @@ static void draw_depend_on_me(DisplayChannel *display, uint32_t surface_id)
     }
 }
 
-static int validate_drawable_bbox(DisplayChannel *display, RedDrawable *drawable)
+static bool validate_drawable_bbox(DisplayChannel *display, RedDrawable *drawable)
 {
         DrawContext *context;
         uint32_t surface_id = drawable->surface_id;
@@ -1190,7 +1430,7 @@ void display_channel_process_draw(DisplayChannel *display, RedDrawable *red_draw
     drawable_unref(drawable);
 }
 
-int display_channel_wait_for_migrate_data(DisplayChannel *display)
+bool display_channel_wait_for_migrate_data(DisplayChannel *display)
 {
     uint64_t end_time = spice_get_monotonic_time_ns() + DISPLAY_CLIENT_MIGRATE_DATA_TIMEOUT;
     RedChannelClient *rcc;
@@ -1201,7 +1441,7 @@ int display_channel_wait_for_migrate_data(DisplayChannel *display)
         return FALSE;
     }
 
-    spice_debug(NULL);
+    spice_debug("trace");
     spice_warn_if_fail(g_list_length(clients) == 1);
 
     rcc = g_list_nth_data(clients, 0);
@@ -1623,6 +1863,8 @@ static void surface_update_dest(RedSurface *surface, const SpiceRect *area)
     canvas->ops->read_bits(canvas, dest, -stride, area);
 }
 
+/* Draws all drawables associated with @surface, starting from the tail of the
+ * ring, and stopping after it draws @last */
 static void draw_until(DisplayChannel *display, RedSurface *surface, Drawable *last)
 {
     RingItem *ring_item;
@@ -1646,6 +1888,11 @@ static void draw_until(DisplayChannel *display, RedSurface *surface, Drawable *l
     } while (now != last);
 }
 
+/* Find the first Drawable in the @current ring that intersects the given
+ * @area, starting at item @from (or the head of the ring if @from is NULL).
+ *
+ * NOTE: this function expects @current to be a ring of Drawables, and more
+ * specifically an instance of Surface::current_list (not Surface::current) */
 static Drawable* current_find_intersects_rect(Ring *current, RingItem *from,
                                               const SpiceRect *area)
 {
@@ -1824,7 +2071,7 @@ void display_channel_destroy_surfaces(DisplayChannel *display)
 {
     int i;
 
-    spice_debug(NULL);
+    spice_debug("trace");
     //to handle better
     for (i = 0; i < NUM_SURFACES; ++i) {
         if (display->priv->surfaces[i].context.canvas) {
@@ -1933,7 +2180,7 @@ static void on_disconnect(RedChannelClient *rcc)
     DisplayChannel *display;
     DisplayChannelClient *dcc;
 
-    spice_info(NULL);
+    spice_debug("trace");
     spice_return_if_fail(rcc != NULL);
 
     dcc = DISPLAY_CHANNEL_CLIENT(rcc);
@@ -1948,7 +2195,7 @@ static void on_disconnect(RedChannelClient *rcc)
                 display->priv->encoder_shared_data.glz_drawable_count);
 }
 
-static int handle_migrate_flush_mark(RedChannelClient *rcc)
+static bool handle_migrate_flush_mark(RedChannelClient *rcc)
 {
     RedChannel *channel = red_channel_client_get_channel(rcc);
 
@@ -1965,7 +2212,7 @@ static uint64_t handle_migrate_data_get_serial(RedChannelClient *rcc, uint32_t s
     return migrate_data->message_serial;
 }
 
-static int handle_migrate_data(RedChannelClient *rcc, uint32_t size, void *message)
+static bool handle_migrate_data(RedChannelClient *rcc, uint32_t size, void *message)
 {
     return dcc_handle_migrate_data(DISPLAY_CHANNEL_CLIENT(rcc), size, message);
 }
@@ -1990,7 +2237,7 @@ DisplayChannel* display_channel_new(RedsState *reds,
     DisplayChannel *display;
 
     /* FIXME: migrate is not used...? */
-    spice_info("create display channel");
+    spice_debug("create display channel");
     display = g_object_new(TYPE_DISPLAY_CHANNEL,
                            "spice-server", reds,
                            "core-interface", core,
@@ -2045,24 +2292,21 @@ display_channel_constructed(GObject *object)
     stat_init(&self->priv->add_stat, "add", CLOCK_THREAD_CPUTIME_ID);
     stat_init(&self->priv->exclude_stat, "exclude", CLOCK_THREAD_CPUTIME_ID);
     stat_init(&self->priv->__exclude_stat, "__exclude", CLOCK_THREAD_CPUTIME_ID);
-#ifdef RED_STATISTICS
     RedsState *reds = red_channel_get_server(RED_CHANNEL(self));
-    self->priv->cache_hits_counter =
-        stat_add_counter(reds, red_channel_get_stat_node(channel),
-                         "cache_hits", TRUE);
-    self->priv->add_to_cache_counter =
-        stat_add_counter(reds, red_channel_get_stat_node(channel),
-                         "add_to_cache", TRUE);
-    self->priv->non_cache_counter =
-        stat_add_counter(reds, red_channel_get_stat_node(channel),
-                         "non_cache", TRUE);
-#endif
+    const RedStatNode *stat = red_channel_get_stat_node(channel);
+    stat_init_counter(&self->priv->cache_hits_counter, reds, stat,
+                      "cache_hits", TRUE);
+    stat_init_counter(&self->priv->add_to_cache_counter, reds, stat,
+                      "add_to_cache", TRUE);
+    stat_init_counter(&self->priv->non_cache_counter, reds, stat,
+                      "non_cache", TRUE);
     image_cache_init(&self->priv->image_cache);
     self->priv->stream_video = SPICE_STREAM_VIDEO_OFF;
     display_channel_init_streams(self);
 
     red_channel_set_cap(channel, SPICE_DISPLAY_CAP_MONITORS_CONFIG);
     red_channel_set_cap(channel, SPICE_DISPLAY_CAP_PREF_COMPRESSION);
+    red_channel_set_cap(channel, SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE);
     red_channel_set_cap(channel, SPICE_DISPLAY_CAP_STREAM_REPORT);
 }
 
@@ -2132,8 +2376,8 @@ void display_channel_update_compression(DisplayChannel *display, DisplayChannelC
     } else {
         display->priv->enable_zlib_glz_wrap = (dcc_get_zlib_glz_state(dcc) == SPICE_WAN_COMPRESSION_ALWAYS);
     }
-    spice_info("jpeg %s", display->priv->enable_jpeg ? "enabled" : "disabled");
-    spice_info("zlib-over-glz %s", display->priv->enable_zlib_glz_wrap ? "enabled" : "disabled");
+    spice_debug("jpeg %s", display->priv->enable_jpeg ? "enabled" : "disabled");
+    spice_debug("zlib-over-glz %s", display->priv->enable_zlib_glz_wrap ? "enabled" : "disabled");
 }
 
 void display_channel_gl_scanout(DisplayChannel *display)
@@ -2172,6 +2416,11 @@ int display_channel_get_stream_id(DisplayChannel *display, Stream *stream)
     return (int)(stream - display->priv->streams_buf);
 }
 
+Stream *display_channel_get_nth_stream(DisplayChannel *display, gint i)
+{
+    return &display->priv->streams_buf[i];
+}
+
 gboolean display_channel_validate_surface(DisplayChannel *display, uint32_t surface_id)
 {
     if SPICE_UNLIKELY(surface_id >= display->priv->n_surfaces) {
@@ -2203,15 +2452,18 @@ void display_channel_set_monitors_config_to_primary(DisplayChannel *display)
 {
     DrawContext *context = &display->priv->surfaces[0].context;
     QXLHead head = { 0, };
+    uint16_t old_max = 1;
 
     spice_return_if_fail(display->priv->surfaces[0].context.canvas);
 
-    if (display->priv->monitors_config)
+    if (display->priv->monitors_config) {
+        old_max = display->priv->monitors_config->max_allowed;
         monitors_config_unref(display->priv->monitors_config);
+    }
 
     head.width = context->width;
     head.height = context->height;
-    display->priv->monitors_config = monitors_config_new(&head, 1, 1);
+    display->priv->monitors_config = monitors_config_new(&head, 1, old_max);
 }
 
 void display_channel_reset_image_cache(DisplayChannel *self)
@@ -2231,14 +2483,13 @@ display_channel_class_init(DisplayChannelClass *klass)
     object_class->finalize = display_channel_finalize;
 
     channel_class->parser = spice_get_client_channel_parser(SPICE_CHANNEL_DISPLAY, NULL);
-    channel_class->handle_parsed = dcc_handle_message;
+    channel_class->handle_message = dcc_handle_message;
 
     channel_class->on_disconnect = on_disconnect;
     channel_class->send_item = dcc_send_item;
     channel_class->handle_migrate_flush_mark = handle_migrate_flush_mark;
     channel_class->handle_migrate_data = handle_migrate_data;
     channel_class->handle_migrate_data_get_serial = handle_migrate_data_get_serial;
-    channel_class->config_socket = dcc_config_socket;
 
     g_object_class_install_property(object_class,
                                     PROP_N_SURFACES,
@@ -2269,6 +2520,6 @@ void display_channel_debug_oom(DisplayChannel *display, const char *msg)
                 msg,
                 display->priv->drawable_count,
                 display->priv->encoder_shared_data.glz_drawable_count,
-                display->priv->current_size,
+                ring_get_length(&display->priv->current_list),
                 red_channel_sum_pipes_size(channel));
 }

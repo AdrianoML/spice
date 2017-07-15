@@ -50,6 +50,11 @@ AC_C_BIGENDIAN
 PKG_PROG_PKG_CONFIG
 
 AC_CHECK_HEADERS([sys/time.h execinfo.h linux/sockios.h])
+AC_CHECK_DECL([TCP_KEEPIDLE], [have_tcp_keepidle="yes"],,
+              [#include <netinet/tcp.h>])
+AS_IF([test "x$have_tcp_keepidle" = "xyes"],
+      [AC_DEFINE([HAVE_TCP_KEEPIDLE],1,[Define to 1 if <netinet/tcp.h> has a TCP_KEEPIDLE definition])],
+)
 AC_FUNC_ALLOCA
 
 SPICE_LT_VERSION=m4_format("%d:%d:%d", SPICE_CURRENT, SPICE_REVISION, SPICE_AGE)
@@ -77,7 +82,7 @@ if test "x$enable_gstreamer" != "xno" && test "x$enable_gstreamer" != "x0.10"; t
         [enable_gstreamer="1.0"
          SPICE_CHECK_GSTREAMER_ELEMENTS($GST_INSPECT_1_0, [gst-plugins-base 1.0], [appsrc videoconvert appsink])
          SPICE_CHECK_GSTREAMER_ELEMENTS($GST_INSPECT_1_0, [gstreamer-libav 1.0], [avenc_mjpeg])
-         SPICE_CHECK_GSTREAMER_ELEMENTS($GST_INSPECT_1_0, [gst-plugins-good 1.0], [vp8enc])
+         SPICE_CHECK_GSTREAMER_ELEMENTS($GST_INSPECT_1_0, [gst-plugins-good 1.0], [vp8enc vp9enc])
          SPICE_CHECK_GSTREAMER_ELEMENTS($GST_INSPECT_1_0, [gst-plugins-ugly 1.0], [x264enc])
          ],
          [if test "x$enable_gstreamer" = "x1.0"; then
@@ -85,7 +90,6 @@ if test "x$enable_gstreamer" != "xno" && test "x$enable_gstreamer" != "x0.10"; t
           fi
     ])
 fi
-AM_CONDITIONAL(HAVE_GSTREAMER_1_0, test "x$have_gstreamer_1_0" = "xyes")
 
 if test "x$enable_gstreamer" != "xno" && test "x$enable_gstreamer" != "x1.0"; then
     SPICE_CHECK_GSTREAMER(GSTREAMER_0_10, 0.10, [gstreamer-0.10 gstreamer-base-0.10 gstreamer-app-0.10 gstreamer-video-0.10],
@@ -100,7 +104,8 @@ if test "x$enable_gstreamer" != "xno" && test "x$enable_gstreamer" != "x1.0"; th
          fi
     ])
 fi
-AM_CONDITIONAL(HAVE_GSTREAMER_0_10, test "x$have_gstreamer_0_10" = "xyes")
+AM_CONDITIONAL(HAVE_GSTREAMER, test "x$have_gstreamer_0_10" = "xyes" || test "x$have_gstreamer_1_0" = "xyes")
+AM_CONDITIONAL(HAVE_GSTREAMER_1_0, test "x$have_gstreamer_1_0" = "xyes")
 
 AS_IF([test "x$enable_gstreamer" = "xyes"],
       [AC_MSG_ERROR("GStreamer support requested but not found")],
@@ -117,6 +122,15 @@ AC_ARG_ENABLE([automated_tests],
 AS_IF([test x"$enable_automated_tests" != "xno"], [enable_automated_tests="yes"])
 AM_CONDITIONAL(HAVE_AUTOMATED_TESTS, test "x$enable_automated_tests" != "xno")
 
+dnl Check for the presence of Valgrind and do the plumbing to allow
+dnl the running of "make check-valgrind".
+AX_VALGRIND_DFLT(memcheck, on)
+AX_VALGRIND_DFLT(helgrind, off)
+AX_VALGRIND_DFLT(drd, off)
+AX_VALGRIND_DFLT(sgcheck, off)
+
+AX_VALGRIND_CHECK
+
 SPICE_CHECK_LZ4
 SPICE_CHECK_SASL
 
@@ -125,7 +139,7 @@ dnl Check deps
 
 AC_CONFIG_SUBDIRS([spice-common])
 COMMON_CFLAGS='-I ${top_srcdir}/spice-common/ -I ${top_builddir}/spice-common/'
-COMMON_CFLAGS+=' -DG_LOG_DOMAIN=\"Spice\"'
+COMMON_CFLAGS="$COMMON_CFLAGS -DG_LOG_DOMAIN=\\\"Spice\\\""
 AC_SUBST(COMMON_CFLAGS)
 
 AC_CHECK_LIBM
@@ -142,12 +156,15 @@ AS_IF([test x"$have_smartcard" = "xyes"], [
     AS_VAR_APPEND([SPICE_REQUIRES], [" libcacard >= 0.1.2"])
 ])
 
-SPICE_PROTOCOL_MIN_VER=0.12.12
+SPICE_PROTOCOL_MIN_VER=0.12.13
 PKG_CHECK_MODULES([SPICE_PROTOCOL], [spice-protocol >= $SPICE_PROTOCOL_MIN_VER])
 AC_SUBST([SPICE_PROTOCOL_MIN_VER])
 
 GLIB2_REQUIRED=2.28
+GLIB2_ENCODED_VERSION="GLIB_VERSION_2_28"
 PKG_CHECK_MODULES([GLIB2], [glib-2.0 >= $GLIB2_REQUIRED gio-2.0 >= $GLIB2_REQUIRED])
+GLIB2_CFLAGS="$GLIB2_CFLAGS -DGLIB_VERSION_MIN_REQUIRED=$GLIB2_ENCODED_VERSION \
+  -DGLIB_VERSION_MAX_ALLOWED=$GLIB2_ENCODED_VERSION"
 AS_VAR_APPEND([SPICE_REQUIRES], [" glib-2.0 >= $GLIB2_REQUIRED gio-2.0 >= $GLIB2_REQUIRED"])
 
 PKG_CHECK_MODULES([GOBJECT2], [gobject-2.0 >= $GLIB2_REQUIRED])
@@ -225,6 +242,11 @@ AC_ARG_ENABLE([statistics],
                               [Build SPICE with statistic code enabled @<:@default=no@:>@]))
 AS_IF([test "$enable_statistics" = "yes"],
       [AC_DEFINE([RED_STATISTICS], [1], [Enable SPICE statistics])])
+
+AC_ARG_ENABLE([extra-checks],
+               AS_HELP_STRING([--enable-extra-checks=@<:@yes/no@:>@],
+                              [Enable expensive checks @<:@default=no@:>@]))
+AM_CONDITIONAL(ENABLE_EXTRA_CHECKS, test "$enable_extra_checks" = "yes")
 
 dnl ===========================================================================
 dnl check compiler flags

@@ -890,9 +890,8 @@ Guest configuration
 
 .Windows
 In a Windows guest, you must then install
-http://elmarco.fedorapeople.org/spice-webdavd-x86-0.1.24.msi[spice-webdavd]
-service, and register the drive (by running 'map-drive.bat' from
-'Program Files/Spice webdav').
+https://www.spice-space.org/download/windows/spice-webdavd/[spice-webdavd]
+service.
 
 .Linux
 
@@ -907,9 +906,7 @@ GL acceleration (virgl)
 
 OpenGL acceleration is currently local only (it has to go through a Unix socket)
 and it needs guest support. It's currently limited to recent linux
-distributions (for example, as a guest, you need an up to date Fedora 23 +
-updated mesa packages from
-https://copr.fedorainfracloud.org/coprs/kraxel/virgl/[copr:kraxel]).
+distributions (for example Fedora 24).
 
 Host-side, you need qemu 2.6, libvirt 1.3.3 and spice 0.13.1, as well as a 4.4
 Linux kernel and Mesa 11.1.

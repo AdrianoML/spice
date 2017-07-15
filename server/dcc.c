@@ -25,8 +25,9 @@
 #include "red-client.h"
 #include "main-channel-client.h"
 #include "spice-server-enums.h"
+#include "glib-compat.h"
 
-G_DEFINE_TYPE(DisplayChannelClient, display_channel_client, RED_TYPE_CHANNEL_CLIENT)
+G_DEFINE_TYPE(DisplayChannelClient, display_channel_client, TYPE_COMMON_GRAPHICS_CHANNEL_CLIENT)
 
 #define DISPLAY_CLIENT_SHORT_TIMEOUT 15000000000ULL //nano
 #define DISPLAY_FREE_LIST_DEFAULT_SIZE 128
@@ -38,6 +39,9 @@ enum
     PROP_JPEG_STATE,
     PROP_ZLIB_GLZ_STATE
 };
+
+static void on_display_video_codecs_update(GObject *gobject, GParamSpec *pspec, gpointer user_data);
+static bool dcc_config_socket(RedChannelClient *rcc);
 
 static void
 display_channel_client_get_property(GObject *object,
@@ -99,12 +103,19 @@ display_channel_client_constructed(GObject *object)
     dcc_init_stream_agents(self);
 
     image_encoders_init(&self->priv->encoders, &DCC_TO_DC(self)->priv->encoder_shared_data);
+
+    g_signal_connect(DCC_TO_DC(self), "notify::video-codecs",
+                     G_CALLBACK(on_display_video_codecs_update), self);
 }
 
 static void
 display_channel_client_finalize(GObject *object)
 {
     DisplayChannelClient *self = DISPLAY_CHANNEL_CLIENT(object);
+
+    g_signal_handlers_disconnect_by_func(DCC_TO_DC(self), on_display_video_codecs_update, self);
+    g_clear_pointer(&self->priv->preferred_video_codecs, g_array_unref);
+    g_clear_pointer(&self->priv->client_preferred_video_codecs, g_array_unref);
     g_free(self->priv);
 
     G_OBJECT_CLASS(display_channel_client_parent_class)->finalize(object);
@@ -114,11 +125,14 @@ static void
 display_channel_client_class_init(DisplayChannelClientClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    RedChannelClientClass *client_class = RED_CHANNEL_CLIENT_CLASS(klass);
 
     object_class->get_property = display_channel_client_get_property;
     object_class->set_property = display_channel_client_set_property;
     object_class->constructed = display_channel_client_constructed;
     object_class->finalize = display_channel_client_finalize;
+
+    client_class->config_socket = dcc_config_socket;
 
     g_object_class_install_property(object_class,
                                     PROP_IMAGE_COMPRESSION,
@@ -189,7 +203,7 @@ static RedSurfaceCreateItem *red_surface_create_item_new(RedChannel* channel,
     return create;
 }
 
-int dcc_drawable_is_in_pipe(DisplayChannelClient *dcc, Drawable *drawable)
+bool dcc_drawable_is_in_pipe(DisplayChannelClient *dcc, Drawable *drawable)
 {
     RedDrawablePipeItem *dpi;
     GList *l;
@@ -208,8 +222,8 @@ int dcc_drawable_is_in_pipe(DisplayChannelClient *dcc, Drawable *drawable)
  * Return: TRUE if wait_if_used == FALSE, or otherwise, if all of the pipe items that
  * are related to the surface have been cleared (or sent) from the pipe.
  */
-int dcc_clear_surface_drawables_from_pipe(DisplayChannelClient *dcc, int surface_id,
-                                          int wait_if_used)
+bool dcc_clear_surface_drawables_from_pipe(DisplayChannelClient *dcc, int surface_id,
+                                           int wait_if_used)
 {
     GList *l;
     int x;
@@ -397,7 +411,7 @@ static void add_drawable_surface_images(DisplayChannelClient *dcc, Drawable *dra
 
         surface_id = drawable->surface_deps[x];
         if (surface_id != -1) {
-            if (dcc->priv->surface_client_created[surface_id] == TRUE) {
+            if (dcc->priv->surface_client_created[surface_id]) {
                 continue;
             }
             dcc_create_surface(dcc, surface_id);
@@ -406,7 +420,7 @@ static void add_drawable_surface_images(DisplayChannelClient *dcc, Drawable *dra
         }
     }
 
-    if (dcc->priv->surface_client_created[drawable->surface_id] == TRUE) {
+    if (dcc->priv->surface_client_created[drawable->surface_id]) {
         return;
     }
 
@@ -472,7 +486,7 @@ static void dcc_init_stream_agents(DisplayChannelClient *dcc)
 
     for (i = 0; i < NUM_STREAMS; i++) {
         StreamAgent *agent = &dcc->priv->stream_agents[i];
-        agent->stream = &display->priv->streams_buf[i];
+        agent->stream = display_channel_get_nth_stream(display, i);
         region_init(&agent->vis_region);
         region_init(&agent->clip);
     }
@@ -481,25 +495,13 @@ static void dcc_init_stream_agents(DisplayChannelClient *dcc)
 DisplayChannelClient *dcc_new(DisplayChannel *display,
                               RedClient *client, RedsStream *stream,
                               int mig_target,
-                              uint32_t *common_caps, int num_common_caps,
-                              uint32_t *caps, int num_caps,
+                              RedChannelCapabilities *caps,
                               SpiceImageCompression image_compression,
                               spice_wan_compression_t jpeg_state,
                               spice_wan_compression_t zlib_glz_state)
 
 {
     DisplayChannelClient *dcc;
-    GArray *common_caps_array = NULL, *caps_array = NULL;
-
-    if (common_caps) {
-        common_caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*common_caps),
-                                              num_common_caps);
-        g_array_append_vals(common_caps_array, common_caps, num_common_caps);
-    }
-    if (caps) {
-        caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*caps), num_caps);
-        g_array_append_vals(caps_array, caps, num_caps);
-    }
 
     dcc = g_initable_new(TYPE_DISPLAY_CHANNEL_CLIENT,
                          NULL, NULL,
@@ -507,20 +509,14 @@ DisplayChannelClient *dcc_new(DisplayChannel *display,
                          "client", client,
                          "stream", stream,
                          "monitor-latency", TRUE,
-                         "common-caps", common_caps_array,
-                         "caps", caps_array,
+                         "caps", caps,
                          "image-compression", image_compression,
                          "jpeg-state", jpeg_state,
                          "zlib-glz-state", zlib_glz_state,
                          NULL);
-    spice_info("New display (client %p) dcc %p stream %p", client, dcc, stream);
+    spice_debug("New display (client %p) dcc %p stream %p", client, dcc, stream);
     common_graphics_channel_set_during_target_migrate(COMMON_GRAPHICS_CHANNEL(display), mig_target);
     dcc->priv->id = common_graphics_channel_get_qxl(COMMON_GRAPHICS_CHANNEL(display))->id;
-
-    if (common_caps_array)
-        g_array_unref(common_caps_array);
-    if (caps_array)
-        g_array_unref(caps_array);
 
     return dcc;
 }
@@ -537,7 +533,7 @@ static void dcc_create_all_streams(DisplayChannelClient *dcc)
 }
 
 /* TODO: this function is evil^Wsynchronous, fix */
-static int display_channel_client_wait_for_init(DisplayChannelClient *dcc)
+static bool display_channel_client_wait_for_init(DisplayChannelClient *dcc)
 {
     dcc->priv->expect_init = TRUE;
     uint64_t end_time = spice_get_monotonic_time_ns() + COMMON_CLIENT_TIMEOUT;
@@ -549,7 +545,7 @@ static int display_channel_client_wait_for_init(DisplayChannelClient *dcc)
         if (dcc->priv->pixmap_cache && dcc->priv->encoders.glz_dict) {
             dcc->priv->pixmap_cache_generation = dcc->priv->pixmap_cache->generation;
             /* TODO: move common.id? if it's used for a per client structure.. */
-            spice_info("creating encoder with id == %d", dcc->priv->id);
+            spice_debug("creating encoder with id == %d", dcc->priv->id);
             if (!image_encoders_glz_create(&dcc->priv->encoders, dcc->priv->id)) {
                 spice_critical("create global lz failed");
             }
@@ -570,7 +566,7 @@ void dcc_start(DisplayChannelClient *dcc)
     DisplayChannel *display = DCC_TO_DC(dcc);
     RedChannelClient *rcc = RED_CHANNEL_CLIENT(dcc);
 
-    red_channel_client_push_set_ack(RED_CHANNEL_CLIENT(dcc));
+    red_channel_client_push_set_ack(rcc);
 
     if (red_channel_client_is_waiting_for_migrate_data(rcc))
         return;
@@ -578,7 +574,7 @@ void dcc_start(DisplayChannelClient *dcc)
     if (!display_channel_client_wait_for_init(dcc))
         return;
 
-    red_channel_client_ack_zero_messages_window(RED_CHANNEL_CLIENT(dcc));
+    red_channel_client_ack_zero_messages_window(rcc);
     if (display->priv->surfaces[0].context.canvas) {
         display_channel_current_flush(display, 0);
         red_channel_client_pipe_add_type(rcc, RED_PIPE_ITEM_TYPE_INVAL_PALETTE_CACHE);
@@ -884,8 +880,9 @@ int dcc_compress_image(DisplayChannelClient *dcc,
             break;
         }
 #endif
-lz_compress:
+        /* fall through */
     case SPICE_IMAGE_COMPRESSION_LZ:
+lz_compress:
         success = image_encoders_compress_lz(&dcc->priv->encoders, dest, src, o_comp_data);
         if (success && !bitmap_fmt_is_rgb(src->format)) {
             dcc_palette_cache_palette(dcc, dest->u.lz_plt.palette, &(dest->u.lz_plt.flags));
@@ -949,8 +946,8 @@ static void dcc_push_release(DisplayChannelClient *dcc, uint8_t type, uint64_t i
     free_list->res->resources[free_list->res->count++].id = id;
 }
 
-int dcc_pixmap_cache_unlocked_add(DisplayChannelClient *dcc, uint64_t id,
-                                  uint32_t size, int lossy)
+bool dcc_pixmap_cache_unlocked_add(DisplayChannelClient *dcc, uint64_t id,
+                                   uint32_t size, int lossy)
 {
     PixmapCache *cache = dcc->priv->pixmap_cache;
     NewCacheItem *item;
@@ -1015,7 +1012,7 @@ int dcc_pixmap_cache_unlocked_add(DisplayChannelClient *dcc, uint64_t id,
     return TRUE;
 }
 
-static int dcc_handle_init(DisplayChannelClient *dcc, SpiceMsgcDisplayInit *init)
+static bool dcc_handle_init(DisplayChannelClient *dcc, SpiceMsgcDisplayInit *init)
 {
     gboolean success;
     RedClient *client = red_channel_client_get_client(RED_CHANNEL_CLIENT(dcc));
@@ -1038,8 +1035,8 @@ static int dcc_handle_init(DisplayChannelClient *dcc, SpiceMsgcDisplayInit *init
     return TRUE;
 }
 
-static int dcc_handle_stream_report(DisplayChannelClient *dcc,
-                                    SpiceMsgcDisplayStreamReport *report)
+static bool dcc_handle_stream_report(DisplayChannelClient *dcc,
+                                     SpiceMsgcDisplayStreamReport *report)
 {
     StreamAgent *agent;
 
@@ -1051,13 +1048,13 @@ static int dcc_handle_stream_report(DisplayChannelClient *dcc,
 
     agent = &dcc->priv->stream_agents[report->stream_id];
     if (!agent->video_encoder) {
-        spice_info("stream_report: no encoder for stream id %u. "
+        spice_debug("stream_report: no encoder for stream id %u. "
                    "The stream has probably been destroyed",
                    report->stream_id);
         return TRUE;
     }
 
-    if (report->num_frames == 0 && report->num_drops == UINT_MAX) {
+    if (report->num_frames == 0 && report->num_drops == UINT32_MAX) {
         spice_warning("stream_report: the client does not support stream %u",
                       report->stream_id);
         /* Stop streaming the video so the client can see it */
@@ -1083,8 +1080,8 @@ static int dcc_handle_stream_report(DisplayChannelClient *dcc,
     return TRUE;
 }
 
-static int dcc_handle_preferred_compression(DisplayChannelClient *dcc,
-        SpiceMsgcDisplayPreferredCompression *pc)
+static bool dcc_handle_preferred_compression(DisplayChannelClient *dcc,
+                                             SpiceMsgcDisplayPreferredCompression *pc)
 {
     switch (pc->image_compression) {
     case SPICE_IMAGE_COMPRESSION_AUTO_LZ:
@@ -1104,7 +1101,119 @@ static int dcc_handle_preferred_compression(DisplayChannelClient *dcc,
     return TRUE;
 }
 
-static int dcc_handle_gl_draw_done(DisplayChannelClient *dcc)
+/* TODO: Client preference should only be considered when host has video-codecs
+ * with the same priority value. At the moment, the video-codec GArray will be
+ * sorted following only the client's preference (@user_data)
+ *
+ * example:
+ * host encoding preference: gstreamer:mjpeg;gstreamer:vp8;gstreamer:h264
+ * client decoding preference: h264, vp9, mjpeg
+ * result: gstreamer:h264;gstreamer:mjpeg;gstreamer:vp8
+ */
+static gint sort_video_codecs_by_client_preference(gconstpointer a_pointer,
+                                                   gconstpointer b_pointer,
+                                                   gpointer user_data)
+{
+    const RedVideoCodec *a = a_pointer;
+    const RedVideoCodec *b = b_pointer;
+    GArray *client_pref = user_data;
+
+    return (g_array_index(client_pref, gint, a->type) -
+            g_array_index(client_pref, gint, b->type));
+}
+
+static void dcc_update_preferred_video_codecs(DisplayChannelClient *dcc)
+{
+    guint i;
+    GArray *video_codecs, *server_codecs;
+    GString *msg;
+
+    server_codecs = display_channel_get_video_codecs(DCC_TO_DC(dcc));
+    spice_return_if_fail(server_codecs != NULL);
+
+    /* Copy current host preference */
+    video_codecs = g_array_sized_new(FALSE, FALSE, sizeof(RedVideoCodec), server_codecs->len);
+    g_array_append_vals(video_codecs, server_codecs->data, server_codecs->len);
+
+    /* Sort the copy of current host preference based on client's preference */
+    g_array_sort_with_data(video_codecs, sort_video_codecs_by_client_preference,
+                           dcc->priv->client_preferred_video_codecs);
+    g_clear_pointer(&dcc->priv->preferred_video_codecs, g_array_unref);
+    dcc->priv->preferred_video_codecs = video_codecs;
+
+    msg = g_string_new("Preferred video-codecs:");
+    for (i = 0; i < video_codecs->len; i++) {
+        RedVideoCodec codec = g_array_index(video_codecs, RedVideoCodec, i);
+        g_string_append_printf(msg, " %d", codec.type);
+    }
+    spice_debug("%s", msg->str);
+    g_string_free(msg, TRUE);
+}
+
+static void on_display_video_codecs_update(GObject *gobject, GParamSpec *pspec, gpointer user_data)
+{
+    DisplayChannelClient *dcc = DISPLAY_CHANNEL_CLIENT(user_data);
+
+    /* Only worry about video-codecs update if client has sent
+     * SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE */
+    if (dcc->priv->client_preferred_video_codecs == NULL) {
+        return;
+    }
+
+    /* New host preference */
+    dcc_update_preferred_video_codecs(dcc);
+}
+
+static int dcc_handle_preferred_video_codec_type(DisplayChannelClient *dcc,
+                                                 SpiceMsgcDisplayPreferredVideoCodecType *msg)
+{
+    gint i, len;
+    gint indexes[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
+    GArray *client;
+
+    g_return_val_if_fail(msg->num_of_codecs > 0, TRUE);
+
+    /* set default to a big and positive number */
+    memset(indexes, 0x7f, sizeof(indexes));
+
+    for (len = 0, i = 0; i < msg->num_of_codecs; i++) {
+        gint video_codec = msg->codecs[i];
+
+        if (video_codec < SPICE_VIDEO_CODEC_TYPE_MJPEG ||
+            video_codec >= SPICE_VIDEO_CODEC_TYPE_ENUM_END) {
+            spice_debug("Client has sent unknow video-codec (value %d at index %d). "
+                        "Ignoring as server can't handle it",
+                         video_codec, i);
+            continue;
+        }
+
+        if (indexes[video_codec] < SPICE_VIDEO_CODEC_TYPE_ENUM_END) {
+            continue;
+        }
+
+        len++;
+        indexes[video_codec] = len;
+    }
+    client = g_array_sized_new(FALSE, FALSE, sizeof(gint), SPICE_VIDEO_CODEC_TYPE_ENUM_END);
+    g_array_append_vals(client, indexes, SPICE_VIDEO_CODEC_TYPE_ENUM_END);
+
+    g_clear_pointer(&dcc->priv->client_preferred_video_codecs, g_array_unref);
+    dcc->priv->client_preferred_video_codecs = client;
+
+    /* New client preference */
+    dcc_update_preferred_video_codecs(dcc);
+    return TRUE;
+}
+
+GArray *dcc_get_preferred_video_codecs_for_encoding(DisplayChannelClient *dcc)
+{
+    if (dcc->priv->preferred_video_codecs != NULL) {
+        return dcc->priv->preferred_video_codecs;
+    }
+    return display_channel_get_video_codecs(DCC_TO_DC(dcc));
+}
+
+static bool dcc_handle_gl_draw_done(DisplayChannelClient *dcc)
 {
     DisplayChannel *display = DCC_TO_DC(dcc);
 
@@ -1120,7 +1229,7 @@ static int dcc_handle_gl_draw_done(DisplayChannelClient *dcc)
     return TRUE;
 }
 
-int dcc_handle_message(RedChannelClient *rcc, uint32_t size, uint16_t type, void *msg)
+bool dcc_handle_message(RedChannelClient *rcc, uint16_t type, uint32_t size, void *msg)
 {
     DisplayChannelClient *dcc = DISPLAY_CHANNEL_CLIENT(rcc);
 
@@ -1134,8 +1243,11 @@ int dcc_handle_message(RedChannelClient *rcc, uint32_t size, uint16_t type, void
             (SpiceMsgcDisplayPreferredCompression *)msg);
     case SPICE_MSGC_DISPLAY_GL_DRAW_DONE:
         return dcc_handle_gl_draw_done(dcc);
+    case SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE:
+        return dcc_handle_preferred_video_codec_type(dcc,
+            (SpiceMsgcDisplayPreferredVideoCodecType *)msg);
     default:
-        return red_channel_client_handle_message(rcc, size, type, msg);
+        return red_channel_client_handle_message(rcc, type, size, msg);
     }
 }
 
@@ -1148,7 +1260,7 @@ static int dcc_handle_migrate_glz_dictionary(DisplayChannelClient *dcc,
                                                  &migrate->glz_dict_data);
 }
 
-static int restore_surface(DisplayChannelClient *dcc, uint32_t surface_id)
+static bool restore_surface(DisplayChannelClient *dcc, uint32_t surface_id)
 {
     /* we don't process commands till we receive the migration data, thus,
      * we should have not sent any surface to the client. */
@@ -1160,12 +1272,12 @@ static int restore_surface(DisplayChannelClient *dcc, uint32_t surface_id)
     return TRUE;
 }
 
-static int restore_surfaces_lossless(DisplayChannelClient *dcc,
-                                         MigrateDisplaySurfacesAtClientLossless *mig_surfaces)
+static bool restore_surfaces_lossless(DisplayChannelClient *dcc,
+                                      MigrateDisplaySurfacesAtClientLossless *mig_surfaces)
 {
     uint32_t i;
 
-    spice_debug(NULL);
+    spice_debug("trace");
     for (i = 0; i < mig_surfaces->num_surfaces; i++) {
         uint32_t surface_id = mig_surfaces->surfaces[i].id;
 
@@ -1175,12 +1287,12 @@ static int restore_surfaces_lossless(DisplayChannelClient *dcc,
     return TRUE;
 }
 
-static int restore_surfaces_lossy(DisplayChannelClient *dcc,
-                                  MigrateDisplaySurfacesAtClientLossy *mig_surfaces)
+static bool restore_surfaces_lossy(DisplayChannelClient *dcc,
+                                   MigrateDisplaySurfacesAtClientLossy *mig_surfaces)
 {
     uint32_t i;
 
-    spice_debug(NULL);
+    spice_debug("trace");
     for (i = 0; i < mig_surfaces->num_surfaces; i++) {
         uint32_t surface_id = mig_surfaces->surfaces[i].id;
         SpiceMigrateDataRect *mig_lossy_rect;
@@ -1200,7 +1312,7 @@ static int restore_surfaces_lossy(DisplayChannelClient *dcc,
     return TRUE;
 }
 
-int dcc_handle_migrate_data(DisplayChannelClient *dcc, uint32_t size, void *message)
+bool dcc_handle_migrate_data(DisplayChannelClient *dcc, uint32_t size, void *message)
 {
     DisplayChannel *display = DCC_TO_DC(dcc);
     int surfaces_restored = FALSE;
@@ -1308,14 +1420,14 @@ void dcc_set_max_stream_bit_rate(DisplayChannelClient *dcc, uint64_t rate)
     dcc->priv->streams_max_bit_rate = rate;
 }
 
-int dcc_config_socket(RedChannelClient *rcc)
+static bool dcc_config_socket(RedChannelClient *rcc)
 {
     RedClient *client = red_channel_client_get_client(rcc);
     MainChannelClient *mcc = red_client_get_main(client);
 
     DISPLAY_CHANNEL_CLIENT(rcc)->is_low_bandwidth = main_channel_client_is_low_bandwidth(mcc);
 
-    return common_channel_config_socket(rcc);
+    return common_channel_client_config_socket(rcc);
 }
 
 gboolean dcc_is_low_bandwidth(DisplayChannelClient *dcc)

@@ -43,6 +43,12 @@ typedef struct RedErrorItem {
     VSCMsgError  error;
 } RedErrorItem;
 
+static uint8_t *
+smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc, uint16_t type, uint32_t size);
+static void
+smartcard_channel_client_release_msg_rcv_buf(RedChannelClient *rcc, uint16_t type,
+                                             uint32_t size, uint8_t *msg);
+
 static void smart_card_channel_client_get_property(GObject *object,
                                                    guint property_id,
                                                    GValue *value,
@@ -67,11 +73,6 @@ static void smart_card_channel_client_set_property(GObject *object,
     }
 }
 
-static void smart_card_channel_client_dispose(GObject *object)
-{
-    G_OBJECT_CLASS(smart_card_channel_client_parent_class)->dispose(object);
-}
-
 static void smart_card_channel_client_finalize(GObject *object)
 {
     SmartCardChannelClient *self = SMARTCARD_CHANNEL_CLIENT(object);
@@ -88,9 +89,12 @@ static void smart_card_channel_client_class_init(SmartCardChannelClientClass *kl
 
     g_type_class_add_private(klass, sizeof(SmartCardChannelClientPrivate));
 
+    RedChannelClientClass *client_class = RED_CHANNEL_CLIENT_CLASS(klass);
+    client_class->alloc_recv_buf = smartcard_channel_client_alloc_msg_rcv_buf;
+    client_class->release_recv_buf = smartcard_channel_client_release_msg_rcv_buf;
+
     object_class->get_property = smart_card_channel_client_get_property;
     object_class->set_property = smart_card_channel_client_set_property;
-    object_class->dispose = smart_card_channel_client_dispose;
     object_class->finalize = smart_card_channel_client_finalize;
 }
 
@@ -102,44 +106,24 @@ smart_card_channel_client_init(SmartCardChannelClient *self)
 
 SmartCardChannelClient* smartcard_channel_client_create(RedChannel *channel,
                                                         RedClient *client, RedsStream *stream,
-                                                        int monitor_latency,
-                                                        int num_common_caps, uint32_t *common_caps,
-                                                        int num_caps, uint32_t *caps)
+                                                        RedChannelCapabilities *caps)
 {
     SmartCardChannelClient *rcc;
-    GArray *common_caps_array = NULL, *caps_array = NULL;
-
-    if (common_caps) {
-        common_caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*common_caps),
-                                              num_common_caps);
-        g_array_append_vals(common_caps_array, common_caps, num_common_caps);
-    }
-    if (caps) {
-        caps_array = g_array_sized_new(FALSE, FALSE, sizeof (*caps), num_caps);
-        g_array_append_vals(caps_array, caps, num_caps);
-    }
 
     rcc = g_initable_new(TYPE_SMARTCARD_CHANNEL_CLIENT,
                          NULL, NULL,
                          "channel", channel,
                          "client", client,
                          "stream", stream,
-                         "monitor-latency", monitor_latency,
-                         "caps", caps_array,
-                         "common-caps", common_caps_array,
+                         "caps", caps,
                          NULL);
-
-    if (caps_array)
-        g_array_unref(caps_array);
-    if (common_caps_array)
-        g_array_unref(common_caps_array);
 
     return rcc;
 }
 
-uint8_t *smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
-                                                    uint16_t type,
-                                                    uint32_t size)
+static uint8_t *
+smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
+                                           uint16_t type, uint32_t size)
 {
     SmartCardChannelClient *scc = SMARTCARD_CHANNEL_CLIENT(rcc);
     RedClient *client = red_channel_client_get_client(rcc);
@@ -170,10 +154,9 @@ uint8_t *smartcard_channel_client_alloc_msg_rcv_buf(RedChannelClient *rcc,
     }
 }
 
-void smartcard_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
-                                                  uint16_t type,
-                                                  uint32_t size,
-                                                  uint8_t *msg)
+static void
+smartcard_channel_client_release_msg_rcv_buf(RedChannelClient *rcc,
+                                             uint16_t type, uint32_t size, uint8_t *msg)
 {
     SmartCardChannelClient *scc = SMARTCARD_CHANNEL_CLIENT(rcc);
 
@@ -292,18 +275,19 @@ static void smartcard_channel_client_write_to_reader(SmartCardChannelClient *scc
 }
 
 
-int smartcard_channel_client_handle_message(RedChannelClient *rcc,
-                                            uint16_t type,
-                                            uint32_t size,
-                                            uint8_t *msg)
+bool smartcard_channel_client_handle_message(RedChannelClient *rcc,
+                                             uint16_t type,
+                                             uint32_t size,
+                                             void *message)
 {
-    VSCMsgHeader* vheader = (VSCMsgHeader*)msg;
+    uint8_t *msg = message;
+    VSCMsgHeader* vheader = message;
     SmartCardChannelClient *scc = SMARTCARD_CHANNEL_CLIENT(rcc);
 
     if (type != SPICE_MSGC_SMARTCARD_DATA) {
         /* Handles seamless migration protocol. Also handles ack's,
          * spicy sends them while spicec does not */
-        return red_channel_client_handle_message(rcc, size, type, msg);
+        return red_channel_client_handle_message(rcc, type, size, msg);
     }
 
     spice_assert(size == vheader->length + sizeof(VSCMsgHeader));
@@ -342,9 +326,9 @@ int smartcard_channel_client_handle_message(RedChannelClient *rcc,
     return TRUE;
 }
 
-int smartcard_channel_client_handle_migrate_data(RedChannelClient *rcc,
-                                                 uint32_t size,
-                                                 void *message)
+bool smartcard_channel_client_handle_migrate_data(RedChannelClient *rcc,
+                                                  uint32_t size,
+                                                  void *message)
 {
     SmartCardChannelClient *scc;
     SpiceMigrateDataHeader *header;
@@ -384,7 +368,7 @@ int smartcard_channel_client_handle_migrate_data(RedChannelClient *rcc,
                                                      mig_data);
 }
 
-int smartcard_channel_client_handle_migrate_flush_mark(RedChannelClient *rcc)
+bool smartcard_channel_client_handle_migrate_flush_mark(RedChannelClient *rcc)
 {
     red_channel_client_pipe_add_type(rcc, RED_PIPE_ITEM_TYPE_SMARTCARD_MIGRATE_DATA);
     return TRUE;
